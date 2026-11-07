@@ -21,13 +21,14 @@ Anvil is a Rust homelab management/provisioning TUI + headless daemon.
 - Provisioning dry run: `cargo run -- apply --manifest /etc/anvil/manifest.toml --dry-run`
 - Read-only discovery: `cargo run -- discover`
 - JSON discovery: `cargo run -- discover --json`
+- Runtime inspection: `cargo run -- runtime`
 
 ## Current Implementation State
 
-- Phase 1--3: CLI, config, privilege detection, logging, event loop, app state scaffolding, read-only host discovery, and telemetry sampling/state updates are implemented.
+- Phase 1--7: CLI, config, privilege detection, logging, event loop, app state scaffolding, read-only host discovery, telemetry sampling/state updates, read-only storage and runtime inspection, declarative provisioning plan validation, and interactive TUI rendering are implemented.
 - `apply` requires `--dry-run`; it never mutates system state.
-- `discover` and `discover --json` are read-only.
-- Storage management, container integrations, init-system mutation, and TUI widgets are not wired.
+- `discover`, `discover --json`, `storage`, and `runtime` are read-only.
+- Container integrations and init-system mutation are not wired.
 - Remove any pre-implementation assumptions before continuing.
 
 ## Architecture

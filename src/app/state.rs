@@ -1,6 +1,7 @@
 use crate::access::AccessContext;
 use crate::config::Config;
 use crate::discovery::DiscoveryReport;
+use crate::runtime::RuntimeInspection;
 use crate::storage::StorageInspection;
 use crate::telemetry::TelemetrySample;
 use std::path::PathBuf;
@@ -12,6 +13,7 @@ pub struct AppState {
     pub access: AccessContext,
     pub discovery: Option<DiscoveryReport>,
     pub storage: Option<StorageInspection>,
+    pub runtime: Option<RuntimeInspection>,
     pub telemetry: Option<TelemetrySample>,
     pub manifest_paths: Vec<PathBuf>,
     pub running: bool,
@@ -24,6 +26,7 @@ impl AppState {
             access,
             discovery: None,
             storage: None,
+            runtime: None,
             telemetry: None,
             manifest_paths,
             running: true,

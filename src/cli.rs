@@ -34,6 +34,10 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    Runtime {
+        #[arg(long)]
+        json: bool,
+    },
     Apply {
         #[arg(
             short,

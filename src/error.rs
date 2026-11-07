@@ -19,6 +19,8 @@ pub enum AnvilError {
     },
     #[error("permission denied: {0}")]
     Permission(String),
+    #[error("runtime error: {0}")]
+    Runtime(String),
 }
 
 pub type Result<T> = std::result::Result<T, AnvilError>;
@@ -29,7 +31,7 @@ impl AnvilError {
         match self {
             Self::Config(_) | Self::ManifestVersion { .. } => 2,
             Self::Permission(_) => 3,
-            Self::Io { .. } => 1,
+            Self::Io { .. } | Self::Runtime(_) => 1,
         }
     }
 }

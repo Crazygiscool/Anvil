@@ -6,16 +6,20 @@ mod discovery;
 mod error;
 mod logging;
 mod platform;
+mod provision;
+mod runtime;
 mod storage;
 mod telemetry;
+mod tui;
 
 use anyhow::Context;
 use app::AppRuntime;
 use clap::Parser;
 use cli::{Cli, Commands};
-use config::{SUPPORTED_VERSION, load as load_config};
+use config::load as load_config;
 use error::AnvilError;
 use platform::{OsCommandRunner, OsTextReader};
+use provision::{load_manifest_jobs, plan_manifest_jobs};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -42,6 +46,7 @@ async fn main() -> ExitCode {
     }
 }
 
+#[allow(clippy::collapsible_if)]
 async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
     let config = load_config(cli.config.clone())?;
     let reader = Arc::new(OsTextReader);
@@ -50,6 +55,7 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
 
     runtime.state.write().await.discovery = Some(discovery::all(reader.as_ref(), &runner));
     runtime.state.write().await.storage = Some(storage::inspect_storage(reader.as_ref(), &runner));
+    runtime.state.write().await.runtime = Some(runtime::inspect_runtime(reader.as_ref(), &runner));
 
     match cli.command {
         None | Some(Commands::Tui { .. }) => {
@@ -101,6 +107,25 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Some(Commands::Runtime { json }) => {
+            let report = runtime
+                .state
+                .read()
+                .await
+                .runtime
+                .clone()
+                .context("runtime report is unavailable")?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .context("runtime report could not be encoded")?
+                );
+            } else {
+                print_runtime_report(&report);
+            }
+            Ok(())
+        }
         Some(Commands::Apply {
             manifest,
             dry_run,
@@ -108,24 +133,55 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
         }) => {
             if !dry_run {
                 return Err(AnvilError::Permission(
-                    "apply is staged only in Phase 1; rerun with --dry-run".to_string(),
+                    "apply requires --dry-run; it never mutates system state".to_string(),
                 )
                 .into());
             }
-            let paths = collect_manifest_paths(manifest)?;
-            for path in &paths {
-                validate_manifest_version(path, SUPPORTED_VERSION)?;
+
+            let jobs = load_manifest_jobs(manifest)?;
+            let plan = plan_manifest_jobs(&jobs)?;
+
+            for job in &jobs {
+                println!(
+                    "[DRY-RUN] Reading manifest: {} (API v{})",
+                    job.path.display(),
+                    job.manifest.version
+                );
+            }
+
+            for action in &plan.actions {
+                println!(
+                    "[DRY-RUN] [{}] {}",
+                    action.domain.to_ascii_uppercase(),
+                    action.summary
+                );
                 if verbose > 0 {
-                    tracing::info!("validated manifest {}", path.display());
+                    if let Some(command) = &action.command {
+                        println!(
+                            "[DRY-RUN] Command: {} {}",
+                            command.program,
+                            command.args.join(" ")
+                        );
+                    }
                 }
             }
-            println!(
-                "[DRY-RUN] Validated {} manifest(s); 0 changes applied.",
-                paths.len()
-            );
-            for path in paths {
-                println!("[DRY-RUN] {} -> schema OK", path.display());
+
+            if plan.error_count > 0 {
+                println!(
+                    "Summary: {} action(s) planned, {} manifest error(s), 0 changes applied (Dry-run mode).",
+                    plan.actions.len(),
+                    plan.error_count
+                );
+                return Err(AnvilError::Config(
+                    "provisioning plan has manifest errors".to_string(),
+                )
+                .into());
             }
+
+            println!(
+                "Summary: {} action(s) planned, 0 errors, 0 changes applied (Dry-run mode).",
+                plan.actions.len()
+            );
             Ok(())
         }
     }
@@ -199,6 +255,7 @@ fn print_storage_report(report: &crate::storage::StorageInspection) {
     }
 }
 
+#[allow(dead_code)]
 fn collect_manifest_paths(input: std::path::PathBuf) -> anyhow::Result<Vec<std::path::PathBuf>> {
     if input.is_dir() {
         let mut paths: Vec<_> = std::fs::read_dir(&input)
@@ -226,6 +283,7 @@ fn collect_manifest_paths(input: std::path::PathBuf) -> anyhow::Result<Vec<std::
     }
 }
 
+#[allow(dead_code)]
 fn validate_manifest_version(path: &std::path::Path, expected: u32) -> anyhow::Result<()> {
     let source = std::fs::read_to_string(path).map_err(|error| AnvilError::Io {
         path: path.to_path_buf(),
@@ -249,4 +307,29 @@ fn validate_manifest_version(path: &std::path::Path, expected: u32) -> anyhow::R
         .into());
     }
     Ok(())
+}
+
+fn print_runtime_report(report: &crate::runtime::RuntimeInspection) {
+    println!(
+        "container_runtimes={} init={} init_detected={}",
+        report.container_runtimes.len(),
+        report.init.kind,
+        report.init.detected
+    );
+    for runtime in &report.container_runtimes {
+        println!(
+            "runtime={} daemon_reachable={} socket={} daemon_status={} containers={}",
+            runtime.name,
+            runtime.daemon_reachable,
+            runtime.socket,
+            runtime.daemon_status.as_deref().unwrap_or("<unknown>"),
+            runtime.containers.len()
+        );
+        for container in &runtime.containers {
+            println!(
+                "  container {} {} {} {}",
+                container.id, container.name, container.image, container.status
+            );
+        }
+    }
 }
