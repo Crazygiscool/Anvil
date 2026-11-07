@@ -38,6 +38,10 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    Plugins {
+        #[arg(long)]
+        json: bool,
+    },
     Apply {
         #[arg(
             short,

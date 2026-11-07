@@ -6,12 +6,14 @@ mod discovery;
 mod error;
 mod logging;
 mod platform;
+mod plugins;
 mod provision;
 mod runtime;
 mod storage;
 mod telemetry;
 mod tui;
 
+use crate::plugins::PluginBackend;
 use anyhow::Context;
 use app::AppRuntime;
 use clap::Parser;
@@ -56,6 +58,10 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
     runtime.state.write().await.discovery = Some(discovery::all(reader.as_ref(), &runner));
     runtime.state.write().await.storage = Some(storage::inspect_storage(reader.as_ref(), &runner));
     runtime.state.write().await.runtime = Some(runtime::inspect_runtime(reader.as_ref(), &runner));
+    runtime.state.write().await.plugins = Some(crate::plugins::WasmPluginEngine::new().scan(
+        reader.as_ref(),
+        &crate::plugins::default_plugin_directories(access::effective_uid()),
+    ));
 
     match cli.command {
         None | Some(Commands::Tui { .. }) => {
@@ -123,6 +129,25 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
                 );
             } else {
                 print_runtime_report(&report);
+            }
+            Ok(())
+        }
+        Some(Commands::Plugins { json }) => {
+            let report = runtime
+                .state
+                .read()
+                .await
+                .plugins
+                .clone()
+                .context("plugin catalog is unavailable")?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .context("plugin catalog could not be encoded")?
+                );
+            } else {
+                print_plugin_report(&report);
             }
             Ok(())
         }
@@ -331,5 +356,28 @@ fn print_runtime_report(report: &crate::runtime::RuntimeInspection) {
                 container.id, container.name, container.image, container.status
             );
         }
+    }
+}
+
+fn print_plugin_report(report: &crate::plugins::PluginCatalog) {
+    println!(
+        "api_version={} plugins={} diagnostics={}",
+        report.api_version,
+        report.plugins.len(),
+        report.diagnostics.len()
+    );
+    for plugin in &report.plugins {
+        println!(
+            "plugin {} v{} api={} exports={} invoked={} result={:?}",
+            plugin.name,
+            plugin.version,
+            plugin.api_version,
+            plugin.exports.join(","),
+            plugin.invoked,
+            plugin.entry_result
+        );
+    }
+    for diagnostic in &report.diagnostics {
+        println!("diagnostic {}: {}", diagnostic.source, diagnostic.error);
     }
 }
