@@ -113,6 +113,7 @@ else
         binary_path="$source_dir/anvil/target/release/anvil"
     fi
 fi
+fi
 
 mkdir -p "$install_dir"
 install -m 0755 "$binary_path" "$install_dir/anvil"
@@ -124,3 +125,5 @@ case ":$PATH:" in
         echo "Start a new shell or add $install_dir to PATH to use anvil."
         ;;
 esac
+
+
