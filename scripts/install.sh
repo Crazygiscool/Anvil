@@ -1,25 +1,30 @@
 #!/bin/sh
-# Quick installer for Anvil release binaries on supported Linux targets.
+# Quick installer for Anvil release binaries, with Cargo source fallback.
 set -eu
 
 repo="Crazygiscool/Anvil"
+repo_url="https://github.com/${repo}.git"
 install_dir="${INSTALL_DIR:-${HOME:-/usr/local}/.local/bin}"
 force=false
+use_source=false
 
 case "${1:-}" in
     --help|-h)
-        cat <<'EOF'
-Usage: install.sh [--from-local]
+        cat <<'USAGE'
+Usage: install.sh [--from-local] [--from-source]
 
-Installs the Anvil binary into INSTALL_DIR, defaulting to $HOME/.local/bin.
+Installs Anvil into INSTALL_DIR, defaulting to $HOME/.local/bin.
 
-Anvil targets statically linked Linux binaries. Non-Linux systems are not currently
-supported.
-EOF
+By default, attempts the latest GitHub release. If no release can be downloaded,
+and Cargo is available, it builds from source as a fallback.
+USAGE
         exit 0
         ;;
     --from-local)
         force=true
+        ;;
+    --from-source)
+        use_source=true
         ;;
     "")
         ;;
@@ -41,9 +46,11 @@ fi
 case "$arch" in
     x86_64)
         artifact="anvil-x86_64-unknown-linux-musl"
+        target="x86_64-unknown-linux-musl"
         ;;
     aarch64|arm64)
         artifact="anvil-aarch64-unknown-linux-musl"
+        target="aarch64-unknown-linux-musl"
         ;;
     *)
         echo "Unsupported Linux architecture: ${arch}" >&2
@@ -74,16 +81,41 @@ else
     }
     trap cleanup EXIT
 
+    download_failed=false
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$url" -o "$tmp"
+        curl -fsSL "$url" -o "$tmp" || download_failed=true
     elif command -v wget >/dev/null 2>&1; then
-        wget -q "$url" -O "$tmp"
+        wget -q "$url" -O "$tmp" || download_failed=true
     else
         echo "curl or wget is required for download installation." >&2
         exit 1
     fi
 
-    binary_path="$tmp"
+    if [ "$download_failed" = "true" ]; then
+        if command -v cargo >/dev/null 2>&1; then
+            use_source=true
+        else
+            echo "Could not download Anvil and Cargo is unavailable." >&2
+            exit 1
+        fi
+    fi
+
+    if [ "$use_source" = "true" ]; then
+        source_dir=$(mktemp -d)
+        source_cleanup() {
+            rm -rf "$tmp" "$source_dir"
+        }
+        trap source_cleanup EXIT
+        git clone --depth 1 "$repo_url" "$source_dir/anvil"
+        (
+            cd "$source_dir/anvil"
+            cargo build --release --target "$target"
+        )
+        binary_path="$source_dir/anvil/target/$target/release/anvil"
+    else
+        binary_path="$tmp"
+        trap cleanup EXIT
+    fi
 fi
 
 mkdir -p "$install_dir"

@@ -73,3 +73,7 @@ sh scripts/install-runtimes.sh --runtime podman --execute --yes
 ```
 
 See `scripts/install-runtimes.sh --help` for supported distributions and daemon options.
+```sh
+curl -fsSL https://raw.githubusercontent.com/Crazygiscool/Anvil/main/scripts/install.sh | sh
+wget -qO- https://raw.githubusercontent.com/Crazygiscool/Anvil/main/scripts/install.sh | sh
+```
