@@ -210,6 +210,13 @@ fn mutation_from_container_verb(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationExecutionReceipt {
+    pub executed: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
 pub struct MutationGateway {
     access: crate::access::AccessContext,
     mode: MutationMode,
@@ -218,6 +225,7 @@ pub struct MutationGateway {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutationMode {
     DryRun,
+    Execute,
 }
 
 impl MutationGateway {
@@ -257,16 +265,6 @@ pub struct PlannedAction {
     pub summary: String,
     pub command: String,
     pub executed: bool,
-}
-
-impl PlannedAction {
-    pub fn from_plan(plan: &MutationPlan) -> Self {
-        Self {
-            summary: plan.summary.clone(),
-            command: plan.command_line(),
-            executed: false,
-        }
-    }
 }
 
 fn verb_name(verb: MutationVerb) -> &'static str {
@@ -359,5 +357,187 @@ pub fn mutation_target_name(target: &MutationTarget) -> &str {
     match target {
         MutationTarget::Container { name, .. } => name,
         MutationTarget::Service { name, .. } => name,
+    }
+}
+
+impl MutationGateway {
+    pub fn execute(
+        &self,
+        plan: &MutationPlan,
+        runner: &dyn crate::platform::CommandRunner,
+    ) -> Result<MutationExecutionReceipt, AnvilError> {
+        if !self.can_mutate() {
+            return Err(AnvilError::Permission(
+                "read-only access cannot execute lifecycle mutations".to_string(),
+            ));
+        }
+
+        if self.mode == MutationMode::DryRun {
+            return Ok(MutationExecutionReceipt {
+                executed: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        }
+
+        let output = runner
+            .run(
+                std::path::Path::new(plan.program),
+                &plan.args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>(),
+            )
+            .map_err(|error| AnvilError::Io {
+                path: std::path::PathBuf::from(plan.program),
+                source: error,
+            })?;
+
+        let status = output.status.unwrap_or(-1);
+        if output.status != Some(0) {
+            return Err(AnvilError::CommandExecution {
+                program: plan.program.to_string(),
+                status,
+                stderr: if output.stderr.is_empty() {
+                    output.stdout
+                } else {
+                    output.stderr
+                },
+            });
+        }
+
+        Ok(MutationExecutionReceipt {
+            executed: true,
+            exit_code: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
+    pub fn plan_and_execute(
+        &self,
+        backend: &dyn MutationBackend,
+        target: &MutationTarget,
+        verb: &MutationVerb,
+        runner: &dyn crate::platform::CommandRunner,
+    ) -> Result<MutationExecutionReceipt, AnvilError> {
+        let plan = self.plan(backend, target, verb)?;
+        self.execute(&plan, runner)
+    }
+}
+
+#[cfg(test)]
+mod execution_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct MockRunner {
+        successes: Vec<bool>,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl crate::platform::CommandRunner for MockRunner {
+        fn run(
+            &self,
+            program: &std::path::Path,
+            args: &[&str],
+        ) -> Result<crate::platform::CommandOutput, std::io::Error> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", program.display(), args.join(" ")));
+            let success = *self
+                .successes
+                .get(self.calls.lock().unwrap().len() - 1)
+                .unwrap_or(&true);
+            Ok(crate::platform::CommandOutput {
+                status: Some(if success { 0 } else { 1 }),
+                stdout: String::new(),
+                stderr: if success {
+                    String::new()
+                } else {
+                    "failed".to_string()
+                },
+            })
+        }
+    }
+
+    #[test]
+    fn gateway_dry_run_does_not_call_runner() {
+        let runner = MockRunner {
+            successes: vec![true],
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let calls = Arc::clone(&runner.calls);
+        let gateway = MutationGateway::new(
+            crate::access::AccessContext {
+                tier: crate::access::AccessTier::Root,
+            },
+            MutationMode::DryRun,
+        );
+        let target = MutationTarget::Service {
+            init: InitKind::Systemd,
+            name: "demo".to_string(),
+        };
+        let plan = gateway
+            .plan(&SystemdBackend, &target, &MutationVerb::Start)
+            .unwrap();
+
+        let receipt = gateway.execute(&plan, &runner).unwrap();
+        assert!(!receipt.executed);
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn gateway_execute_uses_command_array() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = MockRunner {
+            successes: vec![true],
+            calls: Arc::clone(&calls),
+        };
+        let gateway = MutationGateway::new(
+            crate::access::AccessContext {
+                tier: crate::access::AccessTier::Root,
+            },
+            MutationMode::Execute,
+        );
+        let target = MutationTarget::Service {
+            init: InitKind::Systemd,
+            name: "demo".to_string(),
+        };
+        let plan = gateway
+            .plan(&SystemdBackend, &target, &MutationVerb::Start)
+            .unwrap();
+        let receipt = gateway.execute(&plan, &runner).unwrap();
+
+        assert!(receipt.executed);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["systemctl start demo".to_string()]
+        );
+    }
+
+    #[test]
+    fn gateway_execute_reports_nonzero_exit() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = MockRunner {
+            successes: vec![false],
+            calls: Arc::clone(&calls),
+        };
+        let gateway = MutationGateway::new(
+            crate::access::AccessContext {
+                tier: crate::access::AccessTier::Root,
+            },
+            MutationMode::Execute,
+        );
+        let target = MutationTarget::Service {
+            init: InitKind::Systemd,
+            name: "demo".to_string(),
+        };
+        let plan = gateway
+            .plan(&SystemdBackend, &target, &MutationVerb::Start)
+            .unwrap();
+        let result = gateway.execute(&plan, &runner);
+
+        assert!(result.is_err());
+        assert_eq!(calls.lock().unwrap().len(), 1);
     }
 }

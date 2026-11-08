@@ -19,6 +19,12 @@ pub enum AnvilError {
     },
     #[error("permission denied: {0}")]
     Permission(String),
+    #[error("command {program} failed with status {status}: {stderr}")]
+    CommandExecution {
+        program: String,
+        status: i32,
+        stderr: String,
+    },
     #[error("runtime error: {0}")]
     Runtime(String),
 }
@@ -31,7 +37,7 @@ impl AnvilError {
         match self {
             Self::Config(_) | Self::ManifestVersion { .. } => 2,
             Self::Permission(_) => 3,
-            Self::Io { .. } | Self::Runtime(_) => 1,
+            Self::Io { .. } | Self::Runtime(_) | Self::CommandExecution { .. } => 1,
         }
     }
 }
