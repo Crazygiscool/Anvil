@@ -541,3 +541,176 @@ mod execution_tests {
         assert_eq!(calls.lock().unwrap().len(), 1);
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationResult {
+    pub success: bool,
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+pub fn verification_command(
+    target: &MutationTarget,
+) -> Option<crate::provision::model::CommandPlan> {
+    match target {
+        MutationTarget::Container {
+            runtime: RuntimeKind::Docker,
+            name,
+        } => Some(crate::provision::model::CommandPlan {
+            program: "docker".to_string(),
+            args: vec![
+                "inspect".to_string(),
+                "--format={{.State.Running}}".to_string(),
+                name.clone(),
+            ],
+        }),
+        MutationTarget::Container {
+            runtime: RuntimeKind::Podman,
+            name,
+        } => Some(crate::provision::model::CommandPlan {
+            program: "podman".to_string(),
+            args: vec![
+                "inspect".to_string(),
+                "--format={{.State.Running}}".to_string(),
+                name.clone(),
+            ],
+        }),
+        MutationTarget::Service {
+            init: InitKind::Systemd,
+            name,
+        } => Some(crate::provision::model::CommandPlan {
+            program: "systemctl".to_string(),
+            args: vec!["is-active".to_string(), name.clone()],
+        }),
+        MutationTarget::Service {
+            init: InitKind::Openrc,
+            name,
+        } => Some(crate::provision::model::CommandPlan {
+            program: "rc-service".to_string(),
+            args: vec![name.clone(), "status".to_string()],
+        }),
+    }
+}
+
+pub fn build_rollback_plan(
+    backend: &dyn MutationBackend,
+    target: &MutationTarget,
+    verb: &MutationVerb,
+) -> Result<MutationPlan, AnvilError> {
+    let Some(reverse) = rollback_verb(*verb) else {
+        return Err(AnvilError::Config(
+            "lifecycle action has no supported rollback".to_string(),
+        ));
+    };
+    backend.plan(target, &reverse)
+}
+
+pub fn verify_mutation(
+    target: &MutationTarget,
+    runner: &dyn crate::platform::CommandRunner,
+) -> Result<VerificationResult, AnvilError> {
+    let Some(command) = verification_command(target) else {
+        return Err(AnvilError::Config(
+            "target has no verification command".to_string(),
+        ));
+    };
+    let output = runner
+        .run(
+            std::path::Path::new(&command.program),
+            &command
+                .args
+                .iter()
+                .map(|arg| arg.as_str())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| AnvilError::Io {
+            path: std::path::PathBuf::from(&command.program),
+            source: error,
+        })?;
+    let success = output.stdout.trim() == "true"
+        || output.stdout.trim() == "active"
+        || (output.status == Some(0)
+            && output.stdout.trim().is_empty()
+            && output.stderr.trim().is_empty());
+    Ok(VerificationResult {
+        success,
+        command: format!("{} {}", command.program, command.args.join(" ")),
+        exit_code: output.status,
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
+#[cfg(test)]
+mod phase_twelve_tests {
+    use super::*;
+
+    #[test]
+    fn verification_commands_cover_every_target() {
+        let targets = [
+            MutationTarget::Container {
+                runtime: RuntimeKind::Docker,
+                name: "app".to_string(),
+            },
+            MutationTarget::Container {
+                runtime: RuntimeKind::Podman,
+                name: "app".to_string(),
+            },
+            MutationTarget::Service {
+                init: InitKind::Systemd,
+                name: "demo.service".to_string(),
+            },
+            MutationTarget::Service {
+                init: InitKind::Openrc,
+                name: "demo".to_string(),
+            },
+        ];
+
+        for target in targets {
+            assert!(verification_command(&target).is_some());
+        }
+    }
+
+    #[test]
+    fn verification_succeeds_for_active_status() {
+        struct Runner;
+        impl crate::platform::CommandRunner for Runner {
+            fn run(
+                &self,
+                program: &std::path::Path,
+                args: &[&str],
+            ) -> Result<crate::platform::CommandOutput, std::io::Error> {
+                assert_eq!(program, std::path::Path::new("systemctl"));
+                assert_eq!(args, ["is-active", "demo.service"]);
+                Ok(crate::platform::CommandOutput {
+                    status: Some(0),
+                    stdout: "active".to_string(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let result = verify_mutation(
+            &MutationTarget::Service {
+                init: InitKind::Systemd,
+                name: "demo.service".to_string(),
+            },
+            &Runner,
+        )
+        .unwrap();
+        assert!(result.success);
+    }
+
+    #[test]
+    fn rollback_plan_preserves_root_gate() {
+        let target = MutationTarget::Service {
+            init: InitKind::Openrc,
+            name: "demo".to_string(),
+        };
+        let plan = build_rollback_plan(&OpenrcBackend, &target, &MutationVerb::Start).unwrap();
+        assert_eq!(plan.program, "rc-service");
+        assert_eq!(plan.args, vec!["demo".to_string(), "stop".to_string()]);
+    }
+}
