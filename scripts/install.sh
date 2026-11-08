@@ -1,5 +1,4 @@
 #!/bin/sh
-# Quick installer for Anvil release binaries, with Cargo source fallback.
 set -eu
 
 repo="Crazygiscool/Anvil"
@@ -10,14 +9,7 @@ use_source=false
 
 case "${1:-}" in
     --help|-h)
-        cat <<'USAGE'
-Usage: install.sh [--from-local] [--from-source]
-
-Installs Anvil into INSTALL_DIR, defaulting to $HOME/.local/bin.
-
-By default, attempts the latest GitHub release. If no release can be downloaded,
-and Cargo is available, it builds from source as a fallback.
-USAGE
+        printf 'Usage: install.sh [--from-local]\n\nBy default, install the latest GitHub release. If it cannot be downloaded and Cargo is available, Anvil is built from source.\n'
         exit 0
         ;;
     --from-local)
@@ -29,7 +21,7 @@ USAGE
     "")
         ;;
     *)
-        echo "Unknown option: $1" >&2
+        printf 'Unknown option: %s\n' "$1" >&2
         exit 2
         ;;
 esac
@@ -46,11 +38,9 @@ fi
 case "$arch" in
     x86_64)
         artifact="anvil-x86_64-unknown-linux-musl"
-        target="x86_64-unknown-linux-musl"
         ;;
     aarch64|arm64)
         artifact="anvil-aarch64-unknown-linux-musl"
-        target="aarch64-unknown-linux-musl"
         ;;
     *)
         echo "Unsupported Linux architecture: ${arch}" >&2
@@ -59,7 +49,7 @@ case "$arch" in
 esac
 
 binary_path=""
-if [ "$force" = "true" ]; then
+if [ "$force" = true ]; then
     for candidate in \
         "target/x86_64-unknown-linux-musl/release/anvil" \
         "target/${arch}-unknown-linux-musl/release/anvil"
@@ -81,40 +71,46 @@ else
     }
     trap cleanup EXIT
 
-    download_failed=false
+    downloaded=false
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$url" -o "$tmp" || download_failed=true
+        if curl -fsSL "$url" -o "$tmp" 2>/dev/null; then
+            downloaded=true
+        fi
     elif command -v wget >/dev/null 2>&1; then
-        wget -q "$url" -O "$tmp" || download_failed=true
+        if wget -q "$url" -O "$tmp"; then
+            downloaded=true
+        fi
     else
         echo "curl or wget is required for download installation." >&2
         exit 1
     fi
 
-    if [ "$download_failed" = "true" ]; then
-        if command -v cargo >/dev/null 2>&1; then
-            use_source=true
-        else
-            echo "Could not download Anvil and Cargo is unavailable." >&2
-            exit 1
-        fi
-    fi
-
-    if [ "$use_source" = "true" ]; then
-        source_dir=$(mktemp -d)
-        source_cleanup() {
-            rm -rf "$tmp" "$source_dir"
-        }
-        trap source_cleanup EXIT
-        git clone --depth 1 "$repo_url" "$source_dir/anvil"
-        (
-            cd "$source_dir/anvil"
-            cargo build --release --target "$target"
-        )
-        binary_path="$source_dir/anvil/target/$target/release/anvil"
-    else
+    if [ "$downloaded" = "true" ]; then
         binary_path="$tmp"
-        trap cleanup EXIT
+    else
+        if [ "$use_source" = "false" ]; then
+            if command -v cargo >/dev/null 2>&1; then
+                use_source=true
+            else
+                echo "Could not download Anvil and Cargo is unavailable." >&2
+                exit 1
+            fi
+        fi
+        if [ "$use_source" = "true" ]; then
+            source_dir=$(mktemp -d)
+            source_cleanup() {
+                rm -rf "$tmp" "$source_dir"
+            }
+            trap source_cleanup EXIT
+            git clone --depth 1 "$repo_url" "$source_dir/anvil"
+            rm -f "$source_dir/anvil/rust-toolchain.toml"
+            (
+            cd "$source_dir/anvil"
+            rm -f rust-toolchain.toml
+            export PATH="$HOME/.cargo/bin:$PATH"
+            cargo build --release
+        )
+        binary_path="$source_dir/anvil/target/release/anvil"
     fi
 fi
 

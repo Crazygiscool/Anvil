@@ -19,5 +19,3 @@ Write-Host "Supported targets are Linux x86_64 and aarch64 only."
 Write-Host "Install it on Linux with scripts/install.sh, or inspect docs/quickstart.md."
 
 exit 1
-EOF
-echo "install.ps1 written"
