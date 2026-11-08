@@ -51,6 +51,8 @@ pub enum Commands {
         )]
         manifest: PathBuf,
         #[arg(long)]
+        json: bool,
+        #[arg(long)]
         dry_run: bool,
         #[arg(short, long, action = clap::ArgAction::Count)]
         verbose: u8,

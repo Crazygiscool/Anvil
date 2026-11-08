@@ -21,6 +21,7 @@ Anvil is a Rust homelab management/provisioning TUI + headless daemon.
 - Help: `cargo run -- --help`
 - TUI mode: `cargo run`
 - Provisioning dry run: `cargo run -- apply --manifest /etc/anvil/manifest.toml --dry-run`
+- Provisioning dry run JSON: `cargo run -- apply --manifest /etc/anvil/manifest.toml --dry-run --json`
 - Read-only discovery: `cargo run -- discover`
 - JSON discovery: `cargo run -- discover --json`
 - Runtime inspection: `cargo run -- runtime`

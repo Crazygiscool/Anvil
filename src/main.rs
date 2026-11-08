@@ -163,6 +163,7 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
         }
         Some(Commands::Apply {
             manifest,
+            json,
             dry_run,
             verbose,
         }) => {
@@ -200,7 +201,32 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
                     }
                 }
             }
-
+            if json {
+                let actions: Vec<serde_json::Value> = plan
+                    .actions
+                    .iter()
+                    .map(|action| {
+                        serde_json::json!({
+                            "domain": action.domain,
+                            "resource": action.resource,
+                            "summary": action.summary,
+                            "command": action.command.as_ref().map(|command| serde_json::json!({
+                                "program": command.program,
+                                "args": command.args,
+                            }))
+                            .unwrap_or(serde_json::Value::Null),
+                        })
+                    })
+                    .collect();
+                let payload = serde_json::to_string_pretty(&serde_json::json!({
+                    "manifests": jobs.len(),
+                    "actions": actions,
+                    "error_count": plan.error_count,
+                    "changes_applied": 0
+                }))?;
+                println!("{}", payload);
+                return Ok(());
+            }
             if plan.error_count > 0 {
                 println!(
                     "Summary: {} action(s) planned, {} manifest error(s), 0 changes applied (Dry-run mode).",
