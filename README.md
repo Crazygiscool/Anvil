@@ -62,3 +62,14 @@ To test a locally built release binary before publishing:
 cargo build --release --target x86_64-unknown-linux-musl
 ./scripts/install.sh --from-local
 ```
+
+## Native Container Runtimes
+
+Install Docker and/or Podman through the Linux host's package manager:
+
+```sh
+sh scripts/install-runtimes.sh --dry-run
+sh scripts/install-runtimes.sh --runtime podman --execute --yes
+```
+
+See `scripts/install-runtimes.sh --help` for supported distributions and daemon options.
