@@ -84,6 +84,13 @@ impl MutationController {
     }
 }
 
+impl std::fmt::Debug for MutationController {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MutationController")
+            .finish_non_exhaustive()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

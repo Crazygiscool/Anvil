@@ -58,6 +58,16 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
     runtime.state.write().await.discovery = Some(discovery::all(reader.as_ref(), &runner));
     runtime.state.write().await.storage = Some(storage::inspect_storage(reader.as_ref(), &runner));
     runtime.state.write().await.runtime = Some(runtime::inspect_runtime(reader.as_ref(), &runner));
+    let command_runner = std::sync::Arc::new(platform::OsCommandRunner);
+    runtime.state.write().await.mutation_controller = Some(runtime::MutationController::new(
+        access,
+        if std::env::var("ANVIL_ALLOW_MUTATION").ok().as_deref() == Some("1") {
+            runtime::mutation::MutationMode::Execute
+        } else {
+            runtime::mutation::MutationMode::DryRun
+        },
+        command_runner.clone(),
+    ));
     runtime.state.write().await.plugins = Some(crate::plugins::WasmPluginEngine::new().scan(
         reader.as_ref(),
         &crate::plugins::default_plugin_directories(access::effective_uid()),
