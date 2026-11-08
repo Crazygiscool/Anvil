@@ -48,3 +48,17 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release
 ```
+## Quick Install
+
+Linux only, direct from the latest GitHub release:
+
+```sh
+./scripts/install.sh
+```
+
+To test a locally built release binary before publishing:
+
+```sh
+cargo build --release --target x86_64-unknown-linux-musl
+./scripts/install.sh --from-local
+```
