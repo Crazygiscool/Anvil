@@ -29,11 +29,11 @@ Anvil is a Rust homelab management/provisioning TUI + headless daemon.
 
 ## Current Implementation State
 
-- Phase 1--9: CLI, config, privilege detection, logging, event loop, app state scaffolding, read-only host discovery, telemetry sampling/state updates, read-only storage and runtime inspection, declarative provisioning plan validation, interactive TUI rendering, Wasm plugin scanning, release documentation, both release target builds, and integration tests are implemented.
+- Phase 1--10: CLI, config, privilege detection, logging, event loop, app state scaffolding, read-only host discovery, telemetry sampling/state updates, read-only storage and runtime inspection, declarative provisioning plan validation, interactive TUI rendering, Wasm plugin scanning, lifecycle mutation planning, release documentation, build verification, and integration tests are implemented.
 - `apply` requires `--dry-run`; it never mutates system state.
 - `discover`, `discover --json`, `storage`, and `runtime` are read-only.
 - Plugin report diagnostics distinguish invalid plugins without failing inventory.
-- Container integrations and init-system mutation are not wired.
+- Container integrations and init-system execution remain capability-gated and dry-run by default; Wasm plugin loading uses restricted capabilities.
 - Remove any pre-implementation assumptions before continuing.
 
 ## Architecture
