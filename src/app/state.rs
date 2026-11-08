@@ -112,3 +112,50 @@ impl MutationController {
         Arc::new(OsCommandRunner)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_only_controller_does_not_plan_lifecycle_mutation() {
+        let mut state =
+            AppState::bootstrap(Config::default(), AccessContext::detect(false), Vec::new());
+        let result = state.plan_runtime_mutation(
+            &crate::runtime::mutation::SystemdBackend,
+            &crate::runtime::mutation::MutationTarget::Service {
+                init: crate::runtime::mutation::InitKind::Systemd,
+                name: "demo".to_string(),
+            },
+            &crate::runtime::mutation::MutationVerb::Restart,
+        );
+        assert!(result.is_err());
+        assert!(state.mutation_audit().is_empty());
+    }
+
+    #[test]
+    fn controller_records_executed_mutation_in_central_state() {
+        let access = AccessContext {
+            tier: crate::access::AccessTier::Root,
+        };
+        let mut state = AppState::bootstrap(Config::default(), access, Vec::new());
+        state.mutation_controller = Some(MutationController::new(
+            access,
+            crate::runtime::mutation::MutationMode::DryRun,
+            MutationController::default_runner(),
+        ));
+        let target = crate::runtime::mutation::MutationTarget::Service {
+            init: crate::runtime::mutation::InitKind::Systemd,
+            name: "demo".to_string(),
+        };
+        let receipt = state
+            .execute_runtime_mutation(
+                &crate::runtime::mutation::SystemdBackend,
+                &target,
+                &crate::runtime::mutation::MutationVerb::Restart,
+            )
+            .unwrap();
+        assert!(!receipt.execution.executed);
+        assert_eq!(state.mutation_audit().len(), 1);
+    }
+}
