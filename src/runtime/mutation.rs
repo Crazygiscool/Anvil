@@ -1,3 +1,4 @@
+#![allow(clippy::items_after_test_module)]
 #![allow(dead_code)]
 #![allow(clippy::clone_on_copy)]
 
@@ -327,9 +328,8 @@ mod tests {
 
     #[test]
     fn gateway_rejects_read_only_access() {
-        use crate::access::{AccessContext, AccessTier};
-        let access = AccessContext {
-            tier: AccessTier::ReadOnly,
+        let access = crate::access::AccessContext {
+            tier: crate::access::AccessTier::ReadOnly,
         };
         let backend = OpenrcBackend;
         let target = MutationTarget::Service {
@@ -342,5 +342,22 @@ mod tests {
                 .plan(&backend, &target, &MutationVerb::Restart)
                 .is_err()
         );
+    }
+}
+
+pub fn rollback_verb(verb: MutationVerb) -> Option<MutationVerb> {
+    match verb {
+        MutationVerb::Start => Some(MutationVerb::Stop),
+        MutationVerb::Stop => Some(MutationVerb::Start),
+        MutationVerb::Restart => None,
+        MutationVerb::Enable => Some(MutationVerb::Disable),
+        MutationVerb::Disable => Some(MutationVerb::Enable),
+    }
+}
+
+pub fn mutation_target_name(target: &MutationTarget) -> &str {
+    match target {
+        MutationTarget::Container { name, .. } => name,
+        MutationTarget::Service { name, .. } => name,
     }
 }
