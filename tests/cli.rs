@@ -102,3 +102,18 @@ fn plugin_inventory_json_exits_success() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("api_version"));
 }
+
+#[test]
+fn runtime_json_exits_success() {
+    let output = Command::new(bin())
+        .arg("runtime")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("provider_integration"));
+    assert!(stdout.contains("container_runtimes"));
+    assert!(stdout.contains("provider_integration"));
+}

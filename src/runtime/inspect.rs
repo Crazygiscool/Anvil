@@ -3,6 +3,8 @@ use crate::platform::{CommandRunner, TextReader};
 use crate::runtime::model::{
     ContainerRuntimeReport, ContainerSummary, InitReport, RuntimeInspection,
 };
+use crate::runtime::provider::ProviderIntegrationReport;
+use crate::runtime::provider::inspect_provider_integration;
 use crate::storage::inspect::find_binary;
 use std::path::{Path, PathBuf};
 
@@ -77,6 +79,7 @@ impl RuntimeBackend for RuntimeCoordinator {
             report.diagnostics.extend(partial.diagnostics);
         }
 
+        report.provider_integration = inspect_provider_integration(reader, runner);
         report
     }
 }
@@ -199,6 +202,7 @@ fn inspect_init(reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeI
                 service_count,
             },
             diagnostics: Vec::new(),
+            provider_integration: ProviderIntegrationReport::default(),
         };
     }
 
@@ -223,6 +227,7 @@ fn inspect_init(reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeI
                 service_count,
             },
             diagnostics: Vec::new(),
+            provider_integration: ProviderIntegrationReport::default(),
         };
     }
 
@@ -235,6 +240,7 @@ fn inspect_init(reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeI
             service_count: 0,
         },
         diagnostics: Vec::new(),
+        provider_integration: ProviderIntegrationReport::default(),
     }
 }
 
@@ -261,7 +267,7 @@ fn count_service_lines(output: &str) -> usize {
         .count()
 }
 
-fn first_output(output: crate::platform::CommandOutput) -> String {
+pub fn first_output(output: crate::platform::CommandOutput) -> String {
     if !output.stdout.is_empty() {
         output.stdout
     } else {

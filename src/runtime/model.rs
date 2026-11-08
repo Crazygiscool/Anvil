@@ -1,4 +1,5 @@
 use crate::discovery::model::Diagnostic;
+use crate::runtime::provider::ProviderIntegrationReport;
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -31,5 +32,6 @@ pub struct InitReport {
 pub struct RuntimeInspection {
     pub container_runtimes: Vec<ContainerRuntimeReport>,
     pub init: InitReport,
+    pub provider_integration: ProviderIntegrationReport,
     pub diagnostics: Vec<Diagnostic>,
 }
