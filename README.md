@@ -1,6 +1,6 @@
 # Anvil
 
-Zero-overhead homelab provisioning and telemetry TUI and headless daemon, compiled as a
+Zero-overhead homelab provisioning and telemetry TUI and headless daemon with docker and podman management, compiled as a
 single static binary.
 
 ## Commands
