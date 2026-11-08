@@ -26,17 +26,14 @@ pub struct ControllerReceipt {
 }
 
 impl MutationController {
-    pub fn new<Runner>(
+    pub fn new(
         access: AccessContext,
         mode: crate::runtime::mutation::MutationMode,
-        runner: Arc<Runner>,
-    ) -> Self
-    where
-        Runner: crate::platform::CommandRunner + Send + Sync + 'static,
-    {
+        runner: Arc<dyn CommandRunner + Send + Sync>,
+    ) -> Self {
         Self {
             gateway: crate::runtime::mutation::MutationGateway::new(access, mode),
-            runner: runner as Arc<dyn CommandRunner + Send + Sync>,
+            runner,
         }
     }
 
@@ -172,7 +169,7 @@ mod tests {
                 tier: crate::access::AccessTier::Root,
             },
             MutationMode::Execute,
-            Arc::clone(&runner),
+            Arc::clone(&runner) as Arc<dyn crate::platform::CommandRunner + Send + Sync>,
         );
         let backend = SystemdBackend;
         let target = crate::runtime::mutation::MutationTarget::Service {
