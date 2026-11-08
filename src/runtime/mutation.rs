@@ -217,6 +217,7 @@ pub struct MutationExecutionReceipt {
     pub stdout: String,
     pub stderr: String,
 }
+#[derive(Debug, Clone)]
 pub struct MutationGateway {
     access: crate::access::AccessContext,
     mode: MutationMode,
@@ -601,7 +602,7 @@ pub fn build_rollback_plan(
 ) -> Result<MutationPlan, AnvilError> {
     let Some(reverse) = rollback_verb(*verb) else {
         return Err(AnvilError::Config(
-            "lifecycle action has no supported rollback".to_string(),
+            "unreversible lifecycle mutation".to_string(),
         ));
     };
     backend.plan(target, &reverse)
