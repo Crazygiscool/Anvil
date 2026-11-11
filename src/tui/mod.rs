@@ -1,11 +1,33 @@
+//! Interactive TUI module with tab management and reusable widgets.
+
+pub mod tabs;
+pub mod widgets;
+
+use crate::app::event::AppEvent;
+use crate::app::state::AppState;
+use crate::tui::tabs::TabManager;
+use crate::tui::tabs::catalog::CatalogTab;
+use crate::tui::tabs::discovery::DiscoveryTab;
+use crate::tui::tabs::overview::OverviewTab;
+use crate::tui::tabs::runtime::RuntimeTab;
+use crate::tui::tabs::storage::StorageTab;
+use crate::tui::tabs::telemetry::TelemetryTab;
 use crossterm::execute;
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
-use std::io::{self, Stdout};
+use std::io;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{RwLock, broadcast};
 
+/// Identifies a TUI tab.
+///
+/// This is the single source of truth for tab identity: [`tabs::TabManager`]
+/// resolves the active tab through it, so a tab can never disagree with the
+/// tab bar about which view is on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTab {
     Overview,
@@ -13,185 +35,190 @@ pub enum ActiveTab {
     Storage,
     Runtime,
     Telemetry,
+    Catalog,
 }
 
 impl ActiveTab {
-    pub fn title(self) -> &'static str {
+    /// Stable identifier used in status output.
+    pub fn name(self) -> &'static str {
         match self {
-            Self::Overview => "Overview",
-            Self::Discovery => "Discovery",
-            Self::Storage => "Storage",
-            Self::Runtime => "Runtime",
-            Self::Telemetry => "Telemetry",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            Self::Overview => Self::Discovery,
-            Self::Discovery => Self::Storage,
-            Self::Storage => Self::Runtime,
-            Self::Runtime => Self::Telemetry,
-            Self::Telemetry => Self::Overview,
-        }
-    }
-
-    pub fn previous(self) -> Self {
-        match self {
-            Self::Overview => Self::Telemetry,
-            Self::Discovery => Self::Overview,
-            Self::Storage => Self::Discovery,
-            Self::Runtime => Self::Storage,
-            Self::Telemetry => Self::Runtime,
+            Self::Overview => "overview",
+            Self::Discovery => "discovery",
+            Self::Storage => "storage",
+            Self::Runtime => "runtime",
+            Self::Telemetry => "telemetry",
+            Self::Catalog => "catalog",
         }
     }
 }
 
-#[allow(dead_code)]
-struct TerminalSession {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+/// Create the tab manager with all tabs.
+pub fn create_tab_manager() -> TabManager {
+    let tabs: Vec<Box<dyn tabs::Tab>> = vec![
+        Box::new(OverviewTab::new()),
+        Box::new(DiscoveryTab::new()),
+        Box::new(StorageTab::new()),
+        Box::new(RuntimeTab::new()),
+        Box::new(TelemetryTab::new()),
+        Box::new(CatalogTab::new()),
+    ];
+    TabManager::new(tabs)
 }
 
-#[allow(dead_code)]
-impl TerminalSession {
-    pub fn startup() -> io::Result<Self> {
-        crossterm::terminal::enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
-        Ok(Self {
-            terminal: Terminal::new(CrosstermBackend::new(stdout))?,
-        })
+/// Run the TUI event loop with the tab manager shell.
+pub async fn run_tui(
+    state: Arc<RwLock<AppState>>,
+    refresh_rate: u64,
+    events: broadcast::Sender<AppEvent>,
+    reader: Arc<dyn crate::platform::TextReader + Send + Sync>,
+) -> crate::error::Result<()> {
+    use crossterm::event::{Event, KeyEventKind, poll as poll_event, read as read_event};
+    use crossterm::terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    };
+    use tokio::time::Duration as TokioDuration;
+
+    if crossterm::terminal::size().is_err() {
+        let _ = tokio::signal::ctrl_c().await;
+        return Ok(());
     }
 
-    pub fn restore(&mut self) {
-        let _ = crossterm::terminal::disable_raw_mode();
-        let _ = execute!(
-            self.terminal.backend_mut(),
-            crossterm::terminal::LeaveAlternateScreen
-        );
-    }
+    enable_raw_mode().map_err(io_to_result)?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen).map_err(io_to_result)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout)).map_err(io_to_result)?;
+
+    let interval_duration = TokioDuration::from_millis(refresh_rate.max(1));
+
+    let mut telemetry_task = tokio::spawn({
+        let state = state.clone();
+        let events = events.clone();
+        async move {
+            let mut interval = tokio::time::interval(interval_duration);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut sampler = crate::telemetry::TelemetrySampler::new();
+
+            let startup_sample = sampler.sample(reader.as_ref());
+            {
+                let mut guard = state.write().await;
+                guard.telemetry = Some(startup_sample.clone());
+                guard.running = true;
+            }
+            let _ = events.send(AppEvent::TelemetrySample(Box::new(startup_sample)));
+
+            loop {
+                interval.tick().await;
+                let sample = sampler.sample(reader.as_ref());
+                if let Ok(mut guard) = state.try_write() {
+                    guard.telemetry = Some(sample.clone());
+                    guard.running = true;
+                }
+                let _ = events.send(AppEvent::TelemetrySample(Box::new(sample)));
+            }
+        }
+    });
+
+    let mut tab_manager = create_tab_manager();
+    let mut show_help = false;
+    let event_sender = events.clone();
+    let mut events = events.subscribe();
+    let mut tick = tokio::time::interval(interval_duration);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let result = loop {
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                if signal.is_ok() {
+                    let _ = event_sender.send(AppEvent::Shutdown);
+                }
+                break Ok(());
+            }
+            result = &mut telemetry_task => {
+                let _ = result;
+                break Err(crate::error::AnvilError::Runtime("telemetry loop exited".to_string()));
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(AppEvent::Shutdown) => break Ok(()),
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Closed) => break Ok(()),
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                }
+            }
+            _ = tick.tick() => {
+                if let Ok(true) = poll_event(Duration::ZERO)
+                    && let Ok(Event::Key(key)) = read_event()
+                        && key.kind == KeyEventKind::Press {
+                            let mut state_guard = state.write().await;
+                            let handled = tab_manager.handle_key(key, &mut state_guard);
+                            if !handled {
+                                match key.code {
+                                    crossterm::event::KeyCode::Char('q') => break Ok(()),
+                                    crossterm::event::KeyCode::Char('h') => show_help = !show_help,
+                                    _ => {}
+                                }
+                            }
+                        }
+            }
+        }
+
+        let snapshot = state.try_read();
+        if let Ok(state_guard) = snapshot {
+            let _ = terminal.draw(|frame| {
+                render_tui(frame, &mut tab_manager, &state_guard, show_help);
+            });
+        }
+    };
+
+    telemetry_task.abort();
+    let _ = telemetry_task.await;
+    let _ = disable_raw_mode();
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    result
 }
 
-pub fn render_tab(
-    frame: &mut Frame,
-    state: &crate::app::state::AppState,
-    tab: ActiveTab,
-    show_help: bool,
-) {
+fn render_tui(frame: &mut Frame, tab_manager: &mut TabManager, state: &AppState, show_help: bool) {
     let area = frame.area();
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
-            Constraint::Length(3),
+            Constraint::Length(if show_help { 3 } else { 0 }),
         ])
         .split(area);
+
     let title_area = layout[0];
     let main_area = layout[1];
-    let footer_area = layout[2];
+    let footer_area = layout.get(2).copied().unwrap_or_default();
 
-    let tabs = Tabs::new(vec![
-        ActiveTab::Overview.title(),
-        ActiveTab::Discovery.title(),
-        ActiveTab::Storage.title(),
-        ActiveTab::Runtime.title(),
-        ActiveTab::Telemetry.title(),
-    ])
-    .select(tab_index(tab))
-    .block(Block::default().borders(Borders::ALL).title(format!(
-        "Anvil ({} access)",
-        access_label(&state.access.tier)
-    )));
+    let tab_titles: Vec<String> = tab_manager
+        .tabs
+        .iter()
+        .map(|tab| tab.title().to_string())
+        .collect();
+    let tabs = Tabs::new(tab_titles)
+        .select(tab_manager.active_index())
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            "Anvil ({} access)",
+            access_label(&state.access.tier)
+        )));
     frame.render_widget(tabs, title_area);
 
-    let content = if show_help {
-        String::from("Controls: q exit, Left/Right tab, h help, j/k scroll (read-only state).")
-    } else {
-        match tab {
-            ActiveTab::Overview => format!(
-                "Overview\nConfig manifest: {}\nDiscovery interfaces: {}\nStorage pools: {}\nRuntime containers: {}\nTelemetry load: {:?}",
-                state.config.manifest_path.display(),
-                state.discovery.as_ref().map(|report| report.network.interfaces.len()).unwrap_or(0),
-                state.storage.as_ref().map(|report| report.zfs_pools.len()).unwrap_or(0),
-                state.runtime.as_ref().map(|report| report.container_runtimes.len()).unwrap_or(0),
-                state.telemetry.as_ref().and_then(|sample| sample.load_average.as_ref().map(|load| load.one)),
-            ),
-            ActiveTab::Discovery => state
-                .discovery
-                .as_ref()
-                .map(|report| format!(
-                    "Storage: zfs={}, btrfs={}, mounts={}\nNetwork: {} interfaces\nDiagnostics: {}",
-                    report.storage.zfs.present,
-                    report.storage.btrfs.present,
-                    report.storage.mounts.len(),
-                    report.network.interfaces.len(),
-                    report.diagnostics.len()
-                ))
-                .unwrap_or_else(|| "Discovery not yet available".to_string()),
-            ActiveTab::Storage => state
-                .storage
-                .as_ref()
-                .map(|report| {
-                    format!(
-                        "ZFS pools: {}\nZFS datasets: {}\nBtrfs subvolumes: {}\nLVM volumes: {}\nDiagnostics: {}",
-                        report.zfs_pools.len(),
-                        report.zfs_datasets.len(),
-                        report.btrfs_subvolumes.len(),
-                        report.lvm_volumes.len(),
-                        report.diagnostics.len()
-                    )
-                })
-                .unwrap_or_else(|| "Storage not yet inspected".to_string()),
-            ActiveTab::Runtime => state
-                .runtime
-                .as_ref()
-                .map(|report| {
-                    format!(
-                        "Init: {} ({})\nContainer runtimes: {}\n",
-                        report.init.kind,
-                        if report.init.detected { "detected" } else { "absent" },
-                        report.container_runtimes.len()
-                    )
-                })
-                .unwrap_or_else(|| "Runtime not yet inspected".to_string()),
-            ActiveTab::Telemetry => state
-                .telemetry
-                .as_ref()
-                .map(|sample| {
-                    format!(
-                        "CPU totals: user={}, system={}, idle={}\nMemory used/total: {} / {}\nDisk read/write: {} / {}\nNetwork rx/tx: {} / {}",
-                        sample.cpu.user,
-                        sample.cpu.system,
-                        sample.cpu.idle,
-                        sample.memory.used_bytes,
-                        sample.memory.total_bytes,
-                        sample.disk.read_bytes,
-                        sample.disk.write_bytes,
-                        sample.network.rx_bytes,
-                        sample.network.tx_bytes,
-                    )
-                })
-                .unwrap_or_else(|| "Telemetry not yet sampled".to_string()),
-        }
-    };
-    let body = Paragraph::new(content)
-        .block(Block::default().borders(Borders::ALL).title("View"))
-        .wrap(ratatui::widgets::Wrap { trim: false });
-    frame.render_widget(body, main_area);
+    tab_manager.render(frame, main_area, state);
 
-    let status = Paragraph::new("q quit | left/right switch tabs | h help")
-        .block(Block::default().borders(Borders::ALL).title("Controls"));
+    let status = Paragraph::new(format!(
+        "q quit | Tab/Shift+Tab switch tabs | h help | a actions | / filter | ? tab help | view: {}",
+        tab_manager.active().name()
+    ))
+    .block(Block::default().borders(Borders::ALL).title("Controls"));
     frame.render_widget(status, footer_area);
 }
 
-pub fn tab_index(tab: ActiveTab) -> usize {
-    match tab {
-        ActiveTab::Overview => 0,
-        ActiveTab::Discovery => 1,
-        ActiveTab::Storage => 2,
-        ActiveTab::Runtime => 3,
-        ActiveTab::Telemetry => 4,
+fn io_to_result(error: io::Error) -> crate::error::AnvilError {
+    crate::error::AnvilError::Io {
+        path: std::path::PathBuf::from("<terminal>"),
+        source: error,
     }
 }
 
@@ -205,28 +232,22 @@ fn access_label(tier: &crate::access::AccessTier) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
 
     #[test]
-    fn renders_overview_without_panic() {
-        let state = crate::app::state::AppState::bootstrap(
-            crate::config::Config::default(),
-            crate::access::AccessContext::detect(false),
-            Vec::new(),
-        );
-        let backend = TestBackend::new(100, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| render_tab(frame, &state, ActiveTab::Overview, false))
-            .unwrap();
-        let text = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(text.contains("Overview"));
+    fn creates_tab_manager_with_unique_tabs() {
+        let manager = create_tab_manager();
+        assert_eq!(manager.tabs.len(), 6);
+
+        let mut names: Vec<&'static str> = manager.tabs.iter().map(|tab| tab.id().name()).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "tab identifiers must be unique");
+    }
+
+    #[test]
+    fn active_tab_names_are_stable() {
+        assert_eq!(ActiveTab::Overview.name(), "overview");
+        assert_eq!(ActiveTab::Catalog.name(), "catalog");
     }
 }
