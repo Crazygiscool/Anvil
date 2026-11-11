@@ -69,8 +69,10 @@ pub fn create_tab_manager() -> TabManager {
 pub async fn run_tui(
     state: Arc<RwLock<AppState>>,
     refresh_rate: u64,
+    host_refresh_rate: u64,
     events: broadcast::Sender<AppEvent>,
     reader: Arc<dyn crate::platform::TextReader + Send + Sync>,
+    runner: Arc<dyn crate::platform::CommandRunner + Send + Sync>,
 ) -> crate::error::Result<()> {
     use crossterm::event::{Event, KeyEventKind, poll as poll_event, read as read_event};
     use crossterm::terminal::{
@@ -89,6 +91,11 @@ pub async fn run_tui(
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout)).map_err(io_to_result)?;
 
     let interval_duration = TokioDuration::from_millis(refresh_rate.max(1));
+
+    // Keep a handle on the reader/runner for the host state refresh, which
+    // outlives the telemetry task below.
+    let refresh_reader = reader.clone();
+    let refresh_runner = runner.clone();
 
     let mut telemetry_task = tokio::spawn({
         let state = state.clone();
@@ -125,6 +132,14 @@ pub async fn run_tui(
     let mut tick = tokio::time::interval(interval_duration);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Host state (discovery, storage, runtime) is re-collected on its own
+    // cadence so the dashboard does not show a stale snapshot.
+    let host_refresh_rate = host_refresh_rate.max(refresh_rate.max(1)).max(1_000);
+    let mut refresh_tick =
+        tokio::time::interval(std::time::Duration::from_millis(host_refresh_rate));
+    refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut refresh_task: Option<tokio::task::JoinHandle<()>> = None;
+
     let result = loop {
         tokio::select! {
             signal = tokio::signal::ctrl_c() => {
@@ -145,7 +160,32 @@ pub async fn run_tui(
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                 }
             }
+            _ = refresh_tick.tick(), if refresh_task.is_none() => {
+                let state = state.clone();
+                let reader = refresh_reader.clone();
+                let runner = refresh_runner.clone();
+                refresh_task = Some(tokio::spawn(async move {
+                    let collected = tokio::task::spawn_blocking(move || {
+                        crate::app::runtime::collect_host_state(reader.as_ref(), runner.as_ref())
+                    })
+                    .await;
+
+                    let Ok((discovery, storage, runtime)) = collected else {
+                        return;
+                    };
+                    let mut guard = state.write().await;
+                    guard.discovery = Some(discovery);
+                    guard.storage = Some(storage);
+                    guard.runtime = Some(runtime);
+                }));
+            }
             _ = tick.tick() => {
+                if let Some(handle) = &mut refresh_task
+                    && handle.is_finished()
+                {
+                    refresh_task = None;
+                }
+
                 if let Ok(true) = poll_event(Duration::ZERO)
                     && let Ok(Event::Key(key)) = read_event()
                         && key.kind == KeyEventKind::Press {
@@ -170,6 +210,9 @@ pub async fn run_tui(
         }
     };
 
+    if let Some(handle) = refresh_task {
+        handle.abort();
+    }
     telemetry_task.abort();
     let _ = telemetry_task.await;
     let _ = disable_raw_mode();

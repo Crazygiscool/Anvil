@@ -3,9 +3,7 @@
 use crate::app::state::AppState;
 use crate::tui::ActiveTab;
 use crate::tui::tabs::Tab;
-use crate::tui::widgets::{
-    Action, ActionMenu, ConfirmDialog, DetailPane, ListWidget, SelectableItem,
-};
+use crate::tui::widgets::{DetailPane, ListWidget, SelectableItem};
 use crossterm::event::KeyEvent;
 use ratatui::{
     Frame,
@@ -81,8 +79,6 @@ impl SelectableItem for StorageItem {
 pub struct StorageTab {
     items: ListWidget<StorageItem>,
     detail: DetailPane,
-    action_menu: ActionMenu,
-    confirm_dialog: ConfirmDialog,
     current_view: StorageView,
     show_help: bool,
 }
@@ -92,15 +88,10 @@ impl StorageTab {
         let items = ListWidget::new("Storage", Vec::new())
             .with_empty_message("No storage data. Run discovery to populate.");
         let detail = DetailPane::new("Storage Details");
-        let action_menu = ActionMenu::new("Storage Actions", Vec::new());
-        let confirm_dialog =
-            ConfirmDialog::new("Confirm", "Are you sure?").with_labels("Yes", "No");
 
         Self {
             items,
             detail,
-            action_menu,
-            confirm_dialog,
             current_view: StorageView::Disks,
             show_help: false,
         }
@@ -190,7 +181,7 @@ impl StorageTab {
             }
         }
 
-        self.items.set_items(all_items);
+        self.items.set_items_preserving_selection(all_items);
     }
 
     fn build_detail(&mut self, state: &AppState) {
@@ -370,128 +361,6 @@ impl StorageTab {
         }
     }
 
-    fn build_action_menu(&mut self) {
-        if let Some(selected) = self.items.selected() {
-            let mut actions = Vec::new();
-
-            match selected.kind {
-                StorageItemKind::ZfsPool => {
-                    actions.push(Action {
-                        label: "Create Dataset".to_string(),
-                        description: "Create new ZFS dataset in this pool".to_string(),
-                        key: Some('d'),
-                        enabled: true,
-                        dangerous: false,
-                    });
-                    actions.push(Action {
-                        label: "Scrub Pool".to_string(),
-                        description: "Start ZFS scrub to check data integrity".to_string(),
-                        key: Some('s'),
-                        enabled: true,
-                        dangerous: false,
-                    });
-                    actions.push(Action {
-                        label: "Export Pool".to_string(),
-                        description: "Export pool for import on another system".to_string(),
-                        key: Some('e'),
-                        enabled: true,
-                        dangerous: true,
-                    });
-                    actions.push(Action {
-                        label: "Destroy Pool".to_string(),
-                        description: "PERMANENTLY DESTROY pool and all data".to_string(),
-                        key: Some('D'),
-                        enabled: true,
-                        dangerous: true,
-                    });
-                }
-                StorageItemKind::ZfsDataset => {
-                    actions.push(Action {
-                        label: "Create Snapshot".to_string(),
-                        description: "Create ZFS snapshot".to_string(),
-                        key: Some('s'),
-                        enabled: true,
-                        dangerous: false,
-                    });
-                    actions.push(Action {
-                        label: "Rollback".to_string(),
-                        description: "Rollback to latest snapshot".to_string(),
-                        key: Some('r'),
-                        enabled: true,
-                        dangerous: true,
-                    });
-                    actions.push(Action {
-                        label: "Set Property".to_string(),
-                        description: "Set ZFS property (compression, quota, etc.)".to_string(),
-                        key: Some('p'),
-                        enabled: true,
-                        dangerous: false,
-                    });
-                    actions.push(Action {
-                        label: "Destroy Dataset".to_string(),
-                        description: "Destroy dataset and all children".to_string(),
-                        key: Some('D'),
-                        enabled: true,
-                        dangerous: true,
-                    });
-                }
-                StorageItemKind::BtrfsSubvolume => {
-                    actions.push(Action {
-                        label: "Create Snapshot".to_string(),
-                        description: "Create Btrfs snapshot".to_string(),
-                        key: Some('s'),
-                        enabled: true,
-                        dangerous: false,
-                    });
-                    actions.push(Action {
-                        label: "Delete Subvolume".to_string(),
-                        description: "Delete this subvolume".to_string(),
-                        key: Some('D'),
-                        enabled: true,
-                        dangerous: true,
-                    });
-                }
-                StorageItemKind::LvmVolume => {
-                    actions.push(Action {
-                        label: "Create Snapshot".to_string(),
-                        description: "Create LVM snapshot".to_string(),
-                        key: Some('s'),
-                        enabled: true,
-                        dangerous: false,
-                    });
-                    actions.push(Action {
-                        label: "Extend Volume".to_string(),
-                        description: "Extend logical volume".to_string(),
-                        key: Some('e'),
-                        enabled: true,
-                        dangerous: false,
-                    });
-                    actions.push(Action {
-                        label: "Remove Volume".to_string(),
-                        description: "Remove logical volume".to_string(),
-                        key: Some('D'),
-                        enabled: true,
-                        dangerous: true,
-                    });
-                }
-                StorageItemKind::Mount => {
-                    actions.push(Action {
-                        label: "Unmount".to_string(),
-                        description: "Unmount filesystem".to_string(),
-                        key: Some('u'),
-                        enabled: true,
-                        dangerous: true,
-                    });
-                }
-                _ => {}
-            }
-
-            if !actions.is_empty() {
-                self.action_menu = ActionMenu::new(format!("Actions: {}", selected.title), actions);
-            }
-        }
-    }
-
     fn cycle_view(&mut self) {
         self.current_view = match self.current_view {
             StorageView::Disks => StorageView::Pools,
@@ -515,26 +384,9 @@ impl Tab for StorageTab {
     }
 
     fn handle_key(&mut self, key: KeyEvent, state: &mut AppState) -> bool {
-        // Check action menu
-        if self.action_menu.is_visible()
-            && let Some(result) = self.action_menu.handle_key(key)
-        {
-            self.handle_action_result(result, state);
-            return true;
-        }
-
-        // Check confirm dialog
-        if self.confirm_dialog.is_visible()
-            && let Some(result) = self.confirm_dialog.handle_key(key)
-        {
-            self.handle_confirm_result(result, state);
-            return true;
-        }
-
         // Handle list keys
         if self.items.handle_key(key) {
             self.build_detail(state);
-            self.build_action_menu();
             return true;
         }
 
@@ -544,12 +396,6 @@ impl Tab for StorageTab {
         }
 
         match key.code {
-            crossterm::event::KeyCode::Char('a') => {
-                if self.items.selected().is_some() {
-                    self.action_menu.show();
-                }
-                true
-            }
             crossterm::event::KeyCode::Char('v') => {
                 self.cycle_view();
                 self.rebuild_items(state);
@@ -611,7 +457,6 @@ impl Tab for StorageTab {
                 "Storage Help:\n\
                 j/k - Navigate items\n\
                 Enter - Select item\n\
-                a - Show actions for selected item\n\
                 v - Cycle view (Disks/Pools/Datasets/Subvolumes/LVM/Mounts)\n\
                 r - Refresh\n\
                 / - Filter\n\
@@ -625,57 +470,8 @@ impl Tab for StorageTab {
         }
     }
 
-    fn action_menu(&mut self) -> Option<&mut ActionMenu> {
-        Some(&mut self.action_menu)
-    }
-
-    fn confirm_dialog(&mut self) -> Option<&mut ConfirmDialog> {
-        Some(&mut self.confirm_dialog)
-    }
-
     fn update(&mut self, state: &AppState) {
         self.rebuild_items(state);
         self.build_detail(state);
-    }
-}
-
-impl StorageTab {
-    fn handle_action_result(
-        &mut self,
-        result: crate::tui::widgets::DialogResult,
-        _state: &mut AppState,
-    ) {
-        if let crate::tui::widgets::DialogResult::Selected(idx) = result
-            && self.items.selected().is_some()
-        {
-            // Get the action
-            if idx < self.action_menu.actions.len() {
-                let action = &self.action_menu.actions[idx];
-                // Show confirmation for dangerous actions
-                if action.dangerous {
-                    self.confirm_dialog = ConfirmDialog::new(
-                        "Confirm Action",
-                        format!("{} - This action cannot be undone!", action.label),
-                    )
-                    .dangerous(true)
-                    .with_labels("Yes, proceed", "Cancel");
-                    self.confirm_dialog.show();
-                } else {
-                    // Execute action (would call mutation backend)
-                    // For now just show a message
-                }
-            }
-        }
-    }
-
-    fn handle_confirm_result(
-        &mut self,
-        result: crate::tui::widgets::DialogResult,
-        _state: &mut AppState,
-    ) {
-        if let crate::tui::widgets::DialogResult::Confirmed = result {
-            // Execute the confirmed action
-            // Would call mutation backend here
-        }
     }
 }

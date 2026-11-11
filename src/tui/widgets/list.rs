@@ -94,6 +94,9 @@ impl SelectableListState {
 
     /// Scroll by page (half screen).
     pub fn page_down(&mut self, len: usize, page_size: usize) {
+        if len == 0 {
+            return;
+        }
         let selected = self.list_state.selected().unwrap_or(0);
         let next = (selected + page_size).min(len - 1);
         self.list_state.select(Some(next));
@@ -238,6 +241,28 @@ impl<T: SelectableItem> ListWidget<T> {
         }
     }
 
+    /// Replace the items, keeping the current selection.
+    ///
+    /// Tabs rebuild their list from the shared state on every frame, so the
+    /// selection has to survive a refresh; otherwise the cursor would jump
+    /// back to the first row on every render.
+    pub fn set_items_preserving_selection(&mut self, items: Vec<T>) {
+        let selected_id = self.selected().map(|item| item.id());
+        self.set_items(items);
+
+        let Some(id) = selected_id else {
+            return;
+        };
+        let position = self
+            .state
+            .filtered_indices
+            .iter()
+            .position(|&original| self.items[original].id() == id);
+        if let Some(position) = position {
+            self.state.list_state.select(Some(position));
+        }
+    }
+
     pub fn add_item(&mut self, item: T) {
         self.items.push(item);
         self.state.rebuild_filtered(&self.items);
@@ -276,20 +301,9 @@ impl<T: SelectableItem> ListWidget<T> {
         let filtered_len = self.state.filtered_indices.len();
 
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down if !self.show_filter => {
-                self.state.next(filtered_len);
-                true
-            }
-            KeyCode::Char('k') | KeyCode::Up if !self.show_filter => {
-                self.state.previous(filtered_len);
-                true
-            }
+            // Control shortcuts keep working while the filter is open.
             KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.state.first();
-                true
-            }
-            KeyCode::Char('G') => {
-                self.state.last(filtered_len);
                 true
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -300,22 +314,6 @@ impl<T: SelectableItem> ListWidget<T> {
                 self.state.page_up(10);
                 true
             }
-            KeyCode::Char('/') => {
-                self.show_filter = true;
-                true
-            }
-            KeyCode::Esc => {
-                if self.show_filter {
-                    self.show_filter = false;
-                    true
-                } else if !self.state.filter.is_empty() {
-                    self.state.clear_filter(&self.items);
-                    true
-                } else {
-                    false
-                }
-            }
-            KeyCode::Enter => true, // Let parent handle selection
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.show_filter {
                     self.state.clear_filter(&self.items);
@@ -323,17 +321,6 @@ impl<T: SelectableItem> ListWidget<T> {
                 } else {
                     false
                 }
-            }
-            KeyCode::Char(c) if self.show_filter => {
-                self.state
-                    .set_filter(format!("{}{}", self.state.filter, c), &self.items);
-                true
-            }
-            KeyCode::Backspace if self.show_filter => {
-                let mut filter = self.state.filter.clone();
-                filter.pop();
-                self.state.set_filter(filter, &self.items);
-                true
             }
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 // Cycle sort: Title -> Subtitle -> Id -> None
@@ -352,6 +339,60 @@ impl<T: SelectableItem> ListWidget<T> {
                 self.state.rebuild_filtered(&self.items);
                 true
             }
+
+            // While filtering, every printable character is part of the query.
+            KeyCode::Char(c) if self.show_filter => {
+                self.state
+                    .set_filter(format!("{}{}", self.state.filter, c), &self.items);
+                true
+            }
+            KeyCode::Backspace if self.show_filter => {
+                let mut filter = self.state.filter.clone();
+                filter.pop();
+                self.state.set_filter(filter, &self.items);
+                true
+            }
+
+            KeyCode::Char('j') => {
+                self.state.next(filtered_len);
+                true
+            }
+            KeyCode::Char('k') => {
+                self.state.previous(filtered_len);
+                true
+            }
+            KeyCode::Down if !self.show_filter => {
+                self.state.next(filtered_len);
+                true
+            }
+            KeyCode::Up if !self.show_filter => {
+                self.state.previous(filtered_len);
+                true
+            }
+            KeyCode::Char('g') => {
+                self.state.first();
+                true
+            }
+            KeyCode::Char('G') => {
+                self.state.last(filtered_len);
+                true
+            }
+            KeyCode::Char('/') => {
+                self.show_filter = true;
+                true
+            }
+            KeyCode::Esc => {
+                if self.show_filter {
+                    self.show_filter = false;
+                    true
+                } else if !self.state.filter.is_empty() {
+                    self.state.clear_filter(&self.items);
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Enter => true, // Let parent handle selection
             KeyCode::Char('?') => {
                 self.show_help = !self.show_help;
                 true
@@ -365,7 +406,10 @@ impl<T: SelectableItem> ListWidget<T> {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(if self.show_filter { 3 } else { 1 }),
+                // The title and the filter input are bordered blocks, so they
+                // each need a row for their content plus two border rows.
+                Constraint::Length(3),
+                Constraint::Length(if self.show_filter { 3 } else { 0 }),
                 Constraint::Min(0),
                 Constraint::Length(if self.show_help { 3 } else { 0 }),
             ])
@@ -373,8 +417,9 @@ impl<T: SelectableItem> ListWidget<T> {
 
         // Title + filter bar
         let title_area = chunks[0];
-        let list_area = chunks[1];
-        let help_area = chunks.get(2).copied().unwrap_or_default();
+        let filter_area = chunks[1];
+        let list_area = chunks[2];
+        let help_area = chunks.get(3).copied().unwrap_or_default();
 
         // Build title line
         let mut title_spans = vec![
@@ -415,12 +460,6 @@ impl<T: SelectableItem> ListWidget<T> {
 
         // Filter input
         if self.show_filter {
-            let filter_area = Rect {
-                y: title_area.y + 1,
-                x: title_area.x + 1,
-                width: title_area.width.saturating_sub(2),
-                height: 1,
-            };
             let filter_text = Paragraph::new(format!("/{}", self.state.filter))
                 .style(Style::default().fg(Color::Yellow))
                 .block(Block::default().borders(Borders::ALL).title("Filter"));
@@ -474,5 +513,221 @@ impl<T: SelectableItem> ListWidget<T> {
                 .wrap(Wrap { trim: true });
             frame.render_widget(help, help_area);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Item {
+        id: String,
+        title: String,
+        subtitle: Option<String>,
+    }
+
+    impl SelectableItem for Item {
+        fn id(&self) -> String {
+            self.id.clone()
+        }
+
+        fn title(&self) -> String {
+            self.title.clone()
+        }
+
+        fn subtitle(&self) -> Option<String> {
+            self.subtitle.clone()
+        }
+    }
+
+    fn item(id: &str, title: &str) -> Item {
+        Item {
+            id: id.to_string(),
+            title: title.to_string(),
+            subtitle: Some(format!("{id}-note")),
+        }
+    }
+
+    fn items() -> Vec<Item> {
+        vec![item("a", "alpha"), item("b", "bravo"), item("c", "charlie")]
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
+    }
+
+    fn render(list: &mut ListWidget<Item>, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| list.render(frame, frame.area()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn starts_with_the_first_item_selected() {
+        let list = ListWidget::new("Items", items());
+        assert_eq!(list.filtered_count(), 3);
+        assert_eq!(list.total_count(), 3);
+        assert_eq!(
+            list.selected().map(|item| item.id.clone()),
+            Some("a".to_string())
+        );
+    }
+
+    #[test]
+    fn navigation_moves_the_selection() {
+        let mut list = ListWidget::new("Items", items());
+
+        assert!(list.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(list.selected_index(), Some(1));
+
+        assert!(list.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(list.selected_index(), Some(0));
+
+        assert!(list.handle_key(key(KeyCode::Char('G'))));
+        assert_eq!(list.selected_index(), Some(2));
+
+        assert!(list.handle_key(key(KeyCode::Char('g'))));
+        assert_eq!(list.selected_index(), Some(0));
+    }
+
+    #[test]
+    fn filter_narrows_the_visible_items() {
+        let mut list = ListWidget::new("Items", items());
+
+        assert!(list.handle_key(key(KeyCode::Char('/'))));
+        assert!(list.show_filter);
+
+        assert!(list.handle_key(key(KeyCode::Char('b'))));
+        assert_eq!(list.filtered_count(), 1);
+        assert_eq!(
+            list.selected().map(|item| item.id.clone()),
+            Some("b".to_string())
+        );
+        assert_eq!(list.total_count(), 3);
+    }
+
+    #[test]
+    fn escape_clears_an_active_filter() {
+        let mut list = ListWidget::new("Items", items());
+        list.state.set_filter("bra".to_string(), &list.items);
+        assert_eq!(list.filtered_count(), 1);
+
+        assert!(list.handle_key(key(KeyCode::Esc)));
+        assert_eq!(list.filtered_count(), 3);
+        assert!(list.state.filter.is_empty());
+    }
+
+    #[test]
+    fn sort_orders_items_by_title() {
+        let mut list = ListWidget::new(
+            "Items",
+            vec![item("c", "charlie"), item("a", "alpha"), item("b", "bravo")],
+        );
+
+        list.state.toggle_sort(SortKey::Title, &list.items);
+
+        let titles: Vec<String> = list
+            .state
+            .filtered_items(&list.items)
+            .iter()
+            .map(|item| item.title.clone())
+            .collect();
+        assert_eq!(titles, vec!["alpha", "bravo", "charlie"]);
+    }
+
+    #[test]
+    fn sorting_twice_reverses_the_order() {
+        let mut list = ListWidget::new("Items", items());
+
+        list.state.toggle_sort(SortKey::Title, &list.items);
+        list.state.toggle_sort(SortKey::Title, &list.items);
+
+        let titles: Vec<String> = list
+            .state
+            .filtered_items(&list.items)
+            .iter()
+            .map(|item| item.title.clone())
+            .collect();
+        assert_eq!(titles, vec!["charlie", "bravo", "alpha"]);
+    }
+
+    #[test]
+    fn set_items_resets_the_selection() {
+        let mut list = ListWidget::new("Items", items());
+        list.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(list.selected_index(), Some(1));
+
+        list.set_items(vec![item("z", "zulu")]);
+
+        assert_eq!(list.selected_index(), Some(0));
+        assert_eq!(
+            list.selected().map(|item| item.id.clone()),
+            Some("z".to_string())
+        );
+    }
+
+    #[test]
+    fn set_items_preserving_selection_keeps_the_cursor() {
+        let mut list = ListWidget::new("Items", items());
+        list.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(list.selected_index(), Some(1));
+
+        list.set_items_preserving_selection(items());
+
+        assert_eq!(list.selected_index(), Some(1));
+        assert_eq!(
+            list.selected().map(|item| item.id.clone()),
+            Some("b".to_string())
+        );
+    }
+
+    #[test]
+    fn set_items_preserving_selection_falls_back_when_the_item_is_gone() {
+        let mut list = ListWidget::new("Items", items());
+        list.handle_key(key(KeyCode::Char('j')));
+
+        list.set_items_preserving_selection(vec![item("z", "zulu")]);
+
+        assert_eq!(list.selected_index(), Some(0));
+        assert_eq!(
+            list.selected().map(|item| item.id.clone()),
+            Some("z".to_string())
+        );
+    }
+
+    #[test]
+    fn renders_item_titles_and_counts() {
+        let mut list = ListWidget::new("Items", items());
+        let text = render(&mut list, 40, 10);
+
+        assert!(text.contains("Items"));
+        assert!(text.contains("(3/3)"));
+        assert!(text.contains("alpha"));
+        assert!(text.contains("charlie"));
+    }
+
+    #[test]
+    fn renders_the_empty_message_when_there_are_no_items() {
+        let mut list = ListWidget::new("Items", Vec::new()).with_empty_message("Nothing here yet.");
+        let text = render(&mut list, 40, 10);
+
+        assert!(text.contains("Nothing here yet."));
     }
 }

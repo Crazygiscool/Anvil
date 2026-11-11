@@ -74,10 +74,22 @@ impl AppState {
             )
         });
 
-        let receipt = controller.execute(backend, target, verb)?;
+        // Keep the controller even when execution fails, so a failed call
+        // cannot silently downgrade the mutation mode for later calls.
+        let receipt = controller.execute(backend, target, verb);
         self.mutation_controller = Some(controller);
+
+        let receipt = receipt?;
         self.mutation_ledger.push(receipt.clone());
         Ok(receipt)
+    }
+
+    /// Whether this session is allowed to mutate the host.
+    pub fn can_mutate(&self) -> bool {
+        self.mutation_controller
+            .as_ref()
+            .map(|controller| controller.can_mutate())
+            .unwrap_or(false)
     }
 
     #[allow(dead_code)]

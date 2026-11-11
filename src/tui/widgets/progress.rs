@@ -123,16 +123,21 @@ impl ProgressOverlay {
     }
 
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        if !self.visible || !self.is_running() || !self.cancellable {
+        if !self.visible || !self.is_running() {
             return false;
         }
 
         use crossterm::event::KeyCode;
         match key.code {
-            KeyCode::Esc | KeyCode::Char('c')
-                if key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            KeyCode::Esc if self.cancellable => {
+                self.cancel();
+                true
+            }
+            KeyCode::Char('c')
+                if self.cancellable
+                    && key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
             {
                 self.cancel();
                 true
@@ -267,14 +272,19 @@ impl ProgressOverlay {
         }
 
         // Hint
-        if self.is_running() && self.cancellable {
+        if self.is_running() {
             let hint_area = Rect {
                 x: inner.x,
                 y,
                 width: inner.width,
                 height: 1,
             };
-            let hint = Paragraph::new("Esc/Ctrl+C: cancel | d: toggle details")
+            let hint = if self.cancellable {
+                "Esc/Ctrl+C: cancel | d: toggle details"
+            } else {
+                "d: toggle details"
+            };
+            let hint = Paragraph::new(hint)
                 .style(Style::default().fg(Color::DarkGray))
                 .alignment(Alignment::Center);
             frame.render_widget(hint, hint_area);
@@ -290,5 +300,156 @@ impl ProgressOverlay {
                 .alignment(Alignment::Center);
             frame.render_widget(hint, hint_area);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
+    }
+
+    fn render_text(overlay: &mut ProgressOverlay) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn starts_hidden_and_idle() {
+        let overlay = ProgressOverlay::new("Operation");
+        assert!(!overlay.is_visible());
+        assert!(!overlay.is_running());
+        assert!(!overlay.is_done());
+        assert_eq!(overlay.state, ProgressState::Idle);
+    }
+
+    #[test]
+    fn start_makes_the_overlay_visible_and_running() {
+        let mut overlay = ProgressOverlay::new("Operation");
+        overlay.start("Working");
+
+        assert!(overlay.is_visible());
+        assert!(overlay.is_running());
+        assert!(!overlay.is_done());
+        assert_eq!(overlay.message, "Working");
+    }
+
+    #[test]
+    fn progress_is_clamped_to_one_hundred() {
+        let mut overlay = ProgressOverlay::new("Operation");
+        overlay.start_determinate("Working");
+        overlay.set_progress(150);
+
+        assert_eq!(overlay.progress, 100);
+        assert_eq!(overlay.state, ProgressState::Running(100));
+    }
+
+    #[test]
+    fn success_is_a_terminal_state() {
+        let mut overlay = ProgressOverlay::new("Operation");
+        overlay.start("Working");
+        overlay.success("Finished");
+
+        assert!(overlay.is_done());
+        assert!(!overlay.is_running());
+        assert_eq!(overlay.progress, 100);
+        assert_eq!(overlay.message, "Finished");
+    }
+
+    #[test]
+    fn error_is_a_terminal_state() {
+        let mut overlay = ProgressOverlay::new("Operation");
+        overlay.start("Working");
+        overlay.error("Boom");
+
+        assert!(overlay.is_done());
+        assert!(!overlay.is_running());
+        assert_eq!(overlay.message, "Boom");
+    }
+
+    #[test]
+    fn cancel_is_a_terminal_state() {
+        let mut overlay = ProgressOverlay::new("Operation");
+        overlay.start("Working");
+        overlay.cancel();
+
+        assert!(overlay.is_done());
+        assert!(!overlay.is_running());
+        assert_eq!(overlay.message, "Cancelled");
+    }
+
+    #[test]
+    fn start_clears_previous_details() {
+        let mut overlay = ProgressOverlay::new("Operation");
+        overlay.start("First");
+        overlay.add_detail("a detail");
+        assert_eq!(overlay.details.len(), 1);
+
+        overlay.start("Second");
+
+        assert!(overlay.details.is_empty());
+    }
+
+    #[test]
+    fn details_toggle_only_while_running() {
+        let mut overlay = ProgressOverlay::new("Operation");
+        overlay.start("Working");
+
+        assert!(overlay.handle_key(key(KeyCode::Char('d'), KeyModifiers::NONE)));
+        assert!(overlay.show_details);
+
+        overlay.success("Finished");
+        assert!(!overlay.handle_key(key(KeyCode::Char('d'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn cancel_key_requires_a_cancellable_operation() {
+        let mut overlay = ProgressOverlay::new("Operation");
+        overlay.start("Working");
+
+        assert!(!overlay.handle_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        assert!(overlay.is_running());
+
+        overlay.set_cancellable(true);
+        assert!(overlay.handle_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        assert!(overlay.is_done());
+    }
+
+    #[test]
+    fn hidden_overlay_ignores_keys() {
+        let mut overlay = ProgressOverlay::new("Operation");
+        assert!(!overlay.handle_key(key(KeyCode::Char('d'), KeyModifiers::NONE)));
+        assert!(!overlay.show_details);
+    }
+
+    #[test]
+    fn renders_the_message() {
+        let mut overlay = ProgressOverlay::new("Operation");
+        overlay.start("Starting container");
+        overlay.success("Container started");
+
+        let text = render_text(&mut overlay);
+
+        assert!(text.contains("Operation"));
+        assert!(text.contains("Container started"));
     }
 }

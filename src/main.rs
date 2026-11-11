@@ -20,7 +20,7 @@ use clap::Parser;
 use cli::{Cli, Commands};
 use config::load as load_config;
 use error::AnvilError;
-use platform::{OsCommandRunner, OsTextReader};
+use platform::OsTextReader;
 use provision::{load_manifest_jobs, plan_manifest_jobs};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -52,13 +52,20 @@ async fn main() -> ExitCode {
 async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
     let config = load_config(cli.config.clone())?;
     let reader = Arc::new(OsTextReader);
-    let runner = OsCommandRunner;
-    let runtime = AppRuntime::bootstrap(config.clone(), access, Vec::new(), reader.clone());
+    let command_runner = Arc::new(platform::OsCommandRunner);
+    let runtime = AppRuntime::bootstrap(
+        config.clone(),
+        access,
+        Vec::new(),
+        reader.clone(),
+        command_runner.clone(),
+    );
 
-    runtime.state.write().await.discovery = Some(discovery::all(reader.as_ref(), &runner));
-    runtime.state.write().await.storage = Some(storage::inspect_storage(reader.as_ref(), &runner));
-    runtime.state.write().await.runtime = Some(runtime::inspect_runtime(reader.as_ref(), &runner));
-    let command_runner = std::sync::Arc::new(platform::OsCommandRunner);
+    runtime.state.write().await.discovery = Some(discovery::all(reader.as_ref(), &*command_runner));
+    runtime.state.write().await.storage =
+        Some(storage::inspect_storage(reader.as_ref(), &*command_runner));
+    runtime.state.write().await.runtime =
+        Some(runtime::inspect_runtime(reader.as_ref(), &*command_runner));
     runtime.state.write().await.mutation_controller = Some(runtime::MutationController::new(
         access,
         if std::env::var("ANVIL_ALLOW_MUTATION").ok().as_deref() == Some("1") {

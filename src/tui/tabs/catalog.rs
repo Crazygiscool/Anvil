@@ -23,6 +23,10 @@ struct CatalogApp {
     image: String,
     ports: Vec<String>,
     volumes: Vec<String>,
+    /// Whether the app is known to be installed on this host.
+    ///
+    /// This stays false until the catalog backend can query the container
+    /// runtime; the tab must not claim an app is installed without knowing it.
     installed: bool,
 }
 
@@ -83,9 +87,9 @@ impl CatalogTab {
             .with_empty_message("No apps in the catalog.");
         let detail = DetailPane::new("App Details");
         let action_menu = ActionMenu::new("App Actions", Vec::new());
-        let confirm_dialog = ConfirmDialog::new("Confirm Install", "Install this application?")
-            .with_labels("Install", "Cancel");
-        let progress = ProgressOverlay::new("Installing Application");
+        let confirm_dialog = ConfirmDialog::new("Preview Install", "Install this application?")
+            .with_labels("Preview", "Cancel");
+        let progress = ProgressOverlay::new("Install Preview");
 
         Self {
             apps,
@@ -285,18 +289,9 @@ impl CatalogTab {
                         style: None,
                     },
                     crate::tui::widgets::DetailField {
-                        key: "Status".to_string(),
-                        value: if app.installed {
-                            "Installed ✓"
-                        } else {
-                            "Not Installed"
-                        }
-                        .to_string(),
-                        style: Some(if app.installed {
-                            Style::default().fg(Color::Green)
-                        } else {
-                            Style::default().fg(Color::Yellow)
-                        }),
+                        key: "Install".to_string(),
+                        value: "preview only - no changes are made to the host".to_string(),
+                        style: Some(Style::default().fg(Color::Yellow)),
                     },
                 ],
             });
@@ -352,6 +347,9 @@ impl CatalogTab {
         if let Some(app) = self.apps.selected() {
             let mut actions = Vec::new();
 
+            // Only actions that actually do something are offered. The
+            // catalog backend is not wired up yet, so every entry here is a
+            // preview that leaves the host untouched.
             if app.installed {
                 actions.push(Action {
                     label: "Uninstall".to_string(),
@@ -360,39 +358,11 @@ impl CatalogTab {
                     enabled: true,
                     dangerous: true,
                 });
-                actions.push(Action {
-                    label: "Update".to_string(),
-                    description: "Pull latest image and recreate containers".to_string(),
-                    key: Some('U'),
-                    enabled: true,
-                    dangerous: false,
-                });
-                actions.push(Action {
-                    label: "View Logs".to_string(),
-                    description: "Show application logs".to_string(),
-                    key: Some('l'),
-                    enabled: true,
-                    dangerous: false,
-                });
-                actions.push(Action {
-                    label: "Backup".to_string(),
-                    description: "Backup application volumes".to_string(),
-                    key: Some('b'),
-                    enabled: true,
-                    dangerous: false,
-                });
             } else {
                 actions.push(Action {
                     label: "Install".to_string(),
                     description: "Preview the deployment of this application".to_string(),
                     key: Some('i'),
-                    enabled: true,
-                    dangerous: false,
-                });
-                actions.push(Action {
-                    label: "Configure".to_string(),
-                    description: "Customize ports, volumes, environment before install".to_string(),
-                    key: Some('c'),
                     enabled: true,
                     dangerous: false,
                 });
@@ -433,31 +403,8 @@ impl Tab for CatalogTab {
         "Catalog"
     }
 
-    fn handle_key(&mut self, key: KeyEvent, state: &mut AppState) -> bool {
-        // Check progress overlay
-        if self.progress.is_visible() && self.progress.handle_key(key) {
-            if self.progress.is_done() && !self.progress.is_running() {
-                self.progress.hide();
-            }
-            return true;
-        }
-
-        // Check action menu
-        if self.action_menu.is_visible()
-            && let Some(result) = self.action_menu.handle_key(key)
-        {
-            self.handle_action_result(result, state);
-            return true;
-        }
-
-        // Check confirm dialog
-        if self.confirm_dialog.is_visible()
-            && let Some(result) = self.confirm_dialog.handle_key(key)
-        {
-            self.handle_confirm_result(result, state);
-            return true;
-        }
-
+    fn handle_key(&mut self, key: KeyEvent, _state: &mut AppState) -> bool {
+        // Overlays are handled by the tab manager before the tab sees a key.
         // Handle list keys
         if self.apps.handle_key(key) {
             self.build_detail();
@@ -554,7 +501,8 @@ impl Tab for CatalogTab {
                 / - Search apps\n\
                 Ctrl+s - Sort\n\
                 Detail: j/k scroll, Ctrl+d/u page\n\
-                ? - Toggle help",
+                ? - Toggle help\n\
+                Installs are previews until the catalog backend is wired up.",
             )
             .block(Block::default().borders(Borders::ALL).title("Help"))
             .wrap(Wrap { trim: true });
@@ -582,10 +530,8 @@ impl Tab for CatalogTab {
     fn update(&mut self, _state: &AppState) {
         // Keep catalog up to date
     }
-}
 
-impl CatalogTab {
-    fn handle_action_result(
+    fn handle_menu_result(
         &mut self,
         result: crate::tui::widgets::DialogResult,
         _state: &mut AppState,
@@ -598,38 +544,33 @@ impl CatalogTab {
             match action.label.as_str() {
                 "Install" => {
                     self.confirm_dialog = ConfirmDialog::new(
-                        "Confirm Install",
-                        format!("Install {} ({})?", app.name, app.image),
+                        "Preview Install",
+                        format!(
+                            "Preview the deployment of {} ({}).\nNo changes will be made to the host.",
+                            app.name, app.image
+                        ),
                     )
-                    .with_labels("Install", "Cancel");
+                    .with_labels("Preview", "Cancel");
                     self.confirm_dialog.show();
                 }
                 "Uninstall" => {
                     self.confirm_dialog = ConfirmDialog::new(
-                        "Confirm Uninstall",
+                        "Preview Uninstall",
                         format!(
-                            "Uninstall {}? This will remove containers and volumes.",
+                            "Preview the removal of {}.\nNo changes will be made to the host.",
                             app.name
                         ),
                     )
                     .dangerous(true)
-                    .with_labels("Uninstall", "Cancel");
+                    .with_labels("Preview", "Cancel");
                     self.confirm_dialog.show();
-                }
-                "Update" => {
-                    // Start update progress
-                    self.progress.start(format!("Updating {}...", app.name));
-                    self.progress.set_cancellable(true);
-                }
-                "Configure" => {
-                    // Would show config dialog
                 }
                 _ => {}
             }
         }
     }
 
-    fn handle_confirm_result(
+    fn handle_dialog_result(
         &mut self,
         result: crate::tui::widgets::DialogResult,
         _state: &mut AppState,

@@ -292,7 +292,7 @@ impl DiscoveryTab {
         for item in &self.tree {
             flatten_item(&mut flat, item);
         }
-        self.flat_list.set_items(flat);
+        self.flat_list.set_items_preserving_selection(flat);
     }
 
     fn toggle_expand(&mut self, id: &str) {

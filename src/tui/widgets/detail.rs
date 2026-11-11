@@ -230,8 +230,7 @@ impl DetailPane {
                     .borders(Borders::ALL)
                     .title(self.title.clone()),
             )
-            .wrap(Wrap { trim: false })
-            .scroll((self.scroll_offset, 0));
+            .wrap(Wrap { trim: false });
 
         frame.render_widget(paragraph, area);
 
@@ -256,5 +255,137 @@ impl DetailPane {
                     .viewport_content_length(self.max_height as usize),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
+    }
+
+    fn pane() -> DetailPane {
+        let mut pane = DetailPane::new("Details");
+        pane.add_section(DetailSection {
+            title: "Section".to_string(),
+            expanded: true,
+            fields: vec![DetailField {
+                key: "Key".to_string(),
+                value: "Value".to_string(),
+                style: None,
+            }],
+        });
+        pane
+    }
+
+    fn render_text(pane: &mut DetailPane) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, frame.area()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn scroll_down_and_up_move_the_offset() {
+        let mut pane = pane();
+        assert_eq!(pane.scroll_offset, 0);
+
+        pane.scroll_down(3);
+        assert_eq!(pane.scroll_offset, 3);
+
+        pane.scroll_up(1);
+        assert_eq!(pane.scroll_offset, 2);
+
+        pane.scroll_top();
+        assert_eq!(pane.scroll_offset, 0);
+    }
+
+    #[test]
+    fn scroll_up_saturates_at_zero() {
+        let mut pane = pane();
+        pane.scroll_up(5);
+        assert_eq!(pane.scroll_offset, 0);
+    }
+
+    #[test]
+    fn space_toggles_the_first_section() {
+        let mut pane = pane();
+        assert!(pane.sections[0].expanded);
+
+        assert!(pane.handle_key(key(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert!(!pane.sections[0].expanded);
+    }
+
+    #[test]
+    fn clear_removes_sections_and_resets_scroll() {
+        let mut pane = pane();
+        pane.scroll_down(5);
+
+        pane.clear();
+
+        assert!(pane.sections.is_empty());
+        assert_eq!(pane.scroll_offset, 0);
+    }
+
+    #[test]
+    fn push_field_creates_a_section_when_none_exists() {
+        let mut pane = DetailPane::new("Details");
+
+        pane.push_field("Key", "Value");
+        assert_eq!(pane.sections.len(), 1);
+        assert_eq!(pane.sections[0].fields.len(), 1);
+
+        pane.push_field("Second", "2");
+        assert_eq!(pane.sections.len(), 1);
+        assert_eq!(pane.sections[0].fields.len(), 2);
+    }
+
+    #[test]
+    fn from_pairs_builds_a_single_section() {
+        let pane =
+            DetailPane::from_pairs("Details", vec![("Key".to_string(), "Value".to_string())]);
+
+        assert_eq!(pane.sections.len(), 1);
+        assert_eq!(pane.sections[0].fields[0].key, "Key");
+        assert_eq!(pane.sections[0].fields[0].value, "Value");
+    }
+
+    #[test]
+    fn renders_section_titles_and_fields() {
+        let mut pane = pane();
+        let text = render_text(&mut pane);
+
+        assert!(text.contains("Details"));
+        assert!(text.contains("Section"));
+        assert!(text.contains("Key"));
+        assert!(text.contains("Value"));
+    }
+
+    #[test]
+    fn collapsed_sections_hide_their_fields() {
+        let mut pane = pane();
+        pane.sections[0].expanded = false;
+
+        let text = render_text(&mut pane);
+
+        assert!(text.contains("Section"));
+        assert!(!text.contains("Value"));
     }
 }

@@ -372,3 +372,222 @@ impl ConfirmDialog {
         frame.render_widget(hint, hint_area);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
+    }
+
+    fn actions() -> Vec<Action> {
+        vec![
+            Action {
+                label: "Start".to_string(),
+                description: "Start the container".to_string(),
+                key: Some('s'),
+                enabled: true,
+                dangerous: false,
+            },
+            Action {
+                label: "Remove".to_string(),
+                description: "Remove the container".to_string(),
+                key: Some('r'),
+                enabled: true,
+                dangerous: true,
+            },
+            Action {
+                label: "Unavailable".to_string(),
+                description: String::new(),
+                key: Some('x'),
+                enabled: false,
+                dangerous: false,
+            },
+        ]
+    }
+
+    fn render_text(render: impl FnOnce(&mut Frame)) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+        terminal.draw(render).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn action_menu_stays_hidden_until_shown() {
+        let mut menu = ActionMenu::new("Actions", actions());
+        assert!(!menu.is_visible());
+
+        menu.show();
+
+        assert!(menu.is_visible());
+        assert_eq!(
+            menu.selected_action().map(|action| action.label.clone()),
+            Some("Start".to_string())
+        );
+    }
+
+    #[test]
+    fn action_menu_enter_selects_the_highlighted_action() {
+        let mut menu = ActionMenu::new("Actions", actions());
+        menu.show();
+
+        assert_eq!(
+            menu.handle_key(key(KeyCode::Enter)),
+            Some(DialogResult::Selected(0))
+        );
+        assert!(!menu.is_visible());
+    }
+
+    #[test]
+    fn action_menu_hotkey_selects_the_matching_action() {
+        let mut menu = ActionMenu::new("Actions", actions());
+        menu.show();
+
+        assert_eq!(
+            menu.handle_key(key(KeyCode::Char('r'))),
+            Some(DialogResult::Selected(1))
+        );
+    }
+
+    #[test]
+    fn action_menu_ignores_disabled_actions() {
+        let mut menu = ActionMenu::new("Actions", actions());
+        menu.show();
+
+        assert_eq!(menu.handle_key(key(KeyCode::Char('x'))), None);
+        assert!(menu.is_visible());
+    }
+
+    #[test]
+    fn action_menu_escape_cancels() {
+        let mut menu = ActionMenu::new("Actions", actions());
+        menu.show();
+
+        assert_eq!(
+            menu.handle_key(key(KeyCode::Esc)),
+            Some(DialogResult::Cancelled)
+        );
+        assert!(!menu.is_visible());
+    }
+
+    #[test]
+    fn action_menu_j_k_moves_the_highlight() {
+        let mut menu = ActionMenu::new("Actions", actions());
+        menu.show();
+
+        assert_eq!(menu.handle_key(key(KeyCode::Char('j'))), None);
+        assert_eq!(
+            menu.selected_action().map(|action| action.label.clone()),
+            Some("Remove".to_string())
+        );
+
+        assert_eq!(menu.handle_key(key(KeyCode::Char('k'))), None);
+        assert_eq!(
+            menu.selected_action().map(|action| action.label.clone()),
+            Some("Start".to_string())
+        );
+    }
+
+    #[test]
+    fn action_menu_ignores_keys_while_hidden() {
+        let mut menu = ActionMenu::new("Actions", actions());
+        assert_eq!(menu.handle_key(key(KeyCode::Enter)), None);
+    }
+
+    #[test]
+    fn confirm_dialog_defaults_to_the_safe_option() {
+        let mut dialog = ConfirmDialog::new("Confirm", "Run it?").with_labels("Run", "Cancel");
+        dialog.show();
+
+        assert!(dialog.is_visible());
+        assert!(!dialog.selected);
+        assert_eq!(
+            dialog.handle_key(key(KeyCode::Enter)),
+            Some(DialogResult::Cancelled)
+        );
+    }
+
+    #[test]
+    fn confirm_dialog_tab_switches_to_confirm() {
+        let mut dialog = ConfirmDialog::new("Confirm", "Run it?");
+        dialog.show();
+
+        assert_eq!(dialog.handle_key(key(KeyCode::Tab)), None);
+        assert!(dialog.selected);
+        assert_eq!(
+            dialog.handle_key(key(KeyCode::Enter)),
+            Some(DialogResult::Confirmed)
+        );
+    }
+
+    #[test]
+    fn confirm_dialog_y_confirms_and_n_cancels() {
+        let mut dialog = ConfirmDialog::new("Confirm", "Run it?");
+
+        dialog.show();
+        assert_eq!(
+            dialog.handle_key(key(KeyCode::Char('y'))),
+            Some(DialogResult::Confirmed)
+        );
+        assert!(!dialog.is_visible());
+
+        dialog.show();
+        assert_eq!(
+            dialog.handle_key(key(KeyCode::Char('n'))),
+            Some(DialogResult::Cancelled)
+        );
+    }
+
+    #[test]
+    fn confirm_dialog_escape_cancels() {
+        let mut dialog = ConfirmDialog::new("Confirm", "Run it?");
+        dialog.show();
+
+        assert_eq!(
+            dialog.handle_key(key(KeyCode::Esc)),
+            Some(DialogResult::Cancelled)
+        );
+        assert!(!dialog.is_visible());
+    }
+
+    #[test]
+    fn action_menu_renders_its_actions() {
+        let mut menu = ActionMenu::new("Actions", actions());
+        menu.show();
+
+        let text = render_text(|frame| menu.render(frame, frame.area()));
+
+        assert!(text.contains("Actions"));
+        assert!(text.contains("Start"));
+        assert!(text.contains("Remove"));
+    }
+
+    #[test]
+    fn confirm_dialog_renders_its_message_and_buttons() {
+        let mut dialog = ConfirmDialog::new("Confirm Start", "Run docker start web?")
+            .with_labels("Run", "Cancel");
+        dialog.show();
+
+        let text = render_text(|frame| dialog.render(frame, frame.area()));
+
+        assert!(text.contains("Confirm Start"));
+        assert!(text.contains("Run docker start web?"));
+        assert!(text.contains("Run"));
+        assert!(text.contains("Cancel"));
+    }
+}

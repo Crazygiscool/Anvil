@@ -296,6 +296,34 @@ impl OverviewTab {
                 ],
             });
         }
+
+        // Recent mutations performed from this session
+        let ledger = state.mutation_audit();
+        if !ledger.is_empty() {
+            let fields = ledger
+                .iter()
+                .rev()
+                .take(5)
+                .map(|receipt| crate::tui::widgets::DetailField {
+                    key: receipt.plan.summary.clone(),
+                    value: if receipt.execution.executed {
+                        "executed".to_string()
+                    } else {
+                        "planned (dry-run)".to_string()
+                    },
+                    style: Some(if receipt.execution.executed {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        Style::default().fg(Color::Yellow)
+                    }),
+                })
+                .collect();
+            self.detail.add_section(crate::tui::widgets::DetailSection {
+                title: "Recent Mutations".to_string(),
+                expanded: true,
+                fields,
+            });
+        }
     }
 }
 
