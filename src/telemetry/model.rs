@@ -53,20 +53,26 @@ pub struct MemoryCounters {
     pub total_bytes: u64,
     pub available_bytes: u64,
     pub used_bytes: u64,
+    pub free_bytes: u64,
     pub swap_total_bytes: u64,
     pub swap_free_bytes: u64,
+    pub swap_used_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct DiskCounters {
     pub read_bytes: u64,
     pub write_bytes: u64,
+    pub read_ops: u64,
+    pub write_ops: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct NetworkCounters {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
+    pub rx_packets: u64,
+    pub tx_packets: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -97,16 +103,22 @@ pub fn unsupported_telemetry_sample() -> TelemetrySample {
             total_bytes: 0,
             available_bytes: 0,
             used_bytes: 0,
+            free_bytes: 0,
             swap_total_bytes: 0,
             swap_free_bytes: 0,
+            swap_used_bytes: 0,
         },
         disk: DiskCounters {
             read_bytes: 0,
             write_bytes: 0,
+            read_ops: 0,
+            write_ops: 0,
         },
         network: NetworkCounters {
             rx_bytes: 0,
             tx_bytes: 0,
+            rx_packets: 0,
+            tx_packets: 0,
         },
         rates: None,
     }

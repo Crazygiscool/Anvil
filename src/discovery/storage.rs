@@ -75,10 +75,14 @@ fn parse_mount(line: &str) -> Option<MountDiscovery> {
     if fields.len() < 4 {
         return None;
     }
+    let target = PathBuf::from(fields[1]);
+    let filesystem = fields[2].to_string();
     Some(MountDiscovery {
         device: fields[0].to_string(),
-        target: PathBuf::from(fields[1]),
-        filesystem: fields[2].to_string(),
+        mount_point: target.clone(),
+        target,
+        fs_type: filesystem.clone(),
+        filesystem,
         options: fields[3].to_string(),
     })
 }
@@ -88,4 +92,26 @@ fn push_diagnostic(diagnostics: &mut Vec<Diagnostic>, source: &str, error: io::E
         source: source.to_string(),
         error: error.to_string(),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_mount_populates_alias_fields() {
+        let mount = parse_mount("/dev/sda1 / ext4 rw,relatime 0 0").unwrap();
+
+        assert_eq!(mount.target, PathBuf::from("/"));
+        assert_eq!(mount.mount_point, PathBuf::from("/"));
+        assert_eq!(mount.filesystem, "ext4");
+        assert_eq!(mount.fs_type, "ext4");
+        assert_eq!(mount.device, "/dev/sda1");
+        assert_eq!(mount.options, "rw,relatime");
+    }
+
+    #[test]
+    fn parse_mount_rejects_short_lines() {
+        assert!(parse_mount("/dev/sda1 / ext4").is_none());
+    }
 }

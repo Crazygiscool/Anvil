@@ -17,6 +17,12 @@ pub struct MountDiscovery {
     pub target: PathBuf,
     pub filesystem: String,
     pub options: String,
+    /// UI-facing alias for `target` (mount point).
+    #[serde(skip_serializing)]
+    pub mount_point: PathBuf,
+    /// UI-facing alias for `filesystem` (fs type).
+    #[serde(skip_serializing)]
+    pub fs_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

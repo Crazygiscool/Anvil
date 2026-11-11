@@ -21,16 +21,22 @@ pub fn collect_raw(reader: &dyn TextReader) -> RawSnapshot {
             total_bytes: 0,
             available_bytes: 0,
             used_bytes: 0,
+            free_bytes: 0,
             swap_total_bytes: 0,
             swap_free_bytes: 0,
+            swap_used_bytes: 0,
         }),
         disk: parse_disk(reader).unwrap_or(DiskCounters {
             read_bytes: 0,
             write_bytes: 0,
+            read_ops: 0,
+            write_ops: 0,
         }),
         network: parse_network(reader).unwrap_or(NetworkCounters {
             rx_bytes: 0,
             tx_bytes: 0,
+            rx_packets: 0,
+            tx_packets: 0,
         }),
         captured_at: Instant::now(),
     }
@@ -142,12 +148,17 @@ pub fn parse_memory(reader: &dyn TextReader) -> Result<MemoryCounters, io::Error
         ));
     }
 
+    let swap_total_bytes = key_b(&raw, "SwapTotal:");
+    let swap_free_bytes = key_b(&raw, "SwapFree:");
+
     Ok(MemoryCounters {
         total_bytes: total,
         available_bytes: available,
         used_bytes: total.saturating_sub(available),
-        swap_total_bytes: key_b(&raw, "SwapTotal:"),
-        swap_free_bytes: key_b(&raw, "SwapFree:"),
+        free_bytes: key_b(&raw, "MemFree:"),
+        swap_total_bytes,
+        swap_free_bytes,
+        swap_used_bytes: swap_total_bytes.saturating_sub(swap_free_bytes),
     })
 }
 
@@ -155,7 +166,11 @@ pub fn parse_disk(reader: &dyn TextReader) -> Result<DiskCounters, io::Error> {
     let raw = reader.read_to_string(Path::new("/proc/diskstats"))?;
     let mut read_bytes = 0u64;
     let mut write_bytes = 0u64;
+    let mut read_ops = 0u64;
+    let mut write_ops = 0u64;
 
+    // /proc/diskstats layout: major minor name reads reads_merged sectors_read ms_reading
+    //                        writes writes_merged sectors_written ...
     for line in raw.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 10 {
@@ -165,11 +180,15 @@ pub fn parse_disk(reader: &dyn TextReader) -> Result<DiskCounters, io::Error> {
         let sectors_written = fields[9].parse::<u64>().unwrap_or(0);
         read_bytes = read_bytes.saturating_add(sectors_read.saturating_mul(512));
         write_bytes = write_bytes.saturating_add(sectors_written.saturating_mul(512));
+        read_ops = read_ops.saturating_add(fields[3].parse::<u64>().unwrap_or(0));
+        write_ops = write_ops.saturating_add(fields[7].parse::<u64>().unwrap_or(0));
     }
 
     Ok(DiskCounters {
         read_bytes,
         write_bytes,
+        read_ops,
+        write_ops,
     })
 }
 
@@ -177,7 +196,11 @@ pub fn parse_network(reader: &dyn TextReader) -> Result<NetworkCounters, io::Err
     let raw = reader.read_to_string(Path::new("/proc/net/dev"))?;
     let mut rx_bytes = 0u64;
     let mut tx_bytes = 0u64;
+    let mut rx_packets = 0u64;
+    let mut tx_packets = 0u64;
 
+    // /proc/net/dev layout: interface: rx_bytes rx_packets rx_errs rx_drop rx_fifo rx_frame
+    //                              rx_compressed rx_multicast tx_bytes tx_packets tx_errs ...
     for line in raw.lines().skip(2) {
         let (interface, rest) = match line.split_once(':') {
             Some(pair) => pair,
@@ -189,14 +212,21 @@ pub fn parse_network(reader: &dyn TextReader) -> Result<NetworkCounters, io::Err
         }
 
         let fields: Vec<&str> = rest.split_whitespace().collect();
-        if fields.len() < 9 {
+        if fields.len() < 10 {
             continue;
         }
         rx_bytes = rx_bytes.saturating_add(fields[0].parse::<u64>().unwrap_or(0));
+        rx_packets = rx_packets.saturating_add(fields[1].parse::<u64>().unwrap_or(0));
         tx_bytes = tx_bytes.saturating_add(fields[8].parse::<u64>().unwrap_or(0));
+        tx_packets = tx_packets.saturating_add(fields[9].parse::<u64>().unwrap_or(0));
     }
 
-    Ok(NetworkCounters { rx_bytes, tx_bytes })
+    Ok(NetworkCounters {
+        rx_bytes,
+        tx_bytes,
+        rx_packets,
+        tx_packets,
+    })
 }
 
 fn parse_load_average(reader: &dyn TextReader) -> Result<LoadAverage, io::Error> {
@@ -229,4 +259,90 @@ fn key_b(source: &str, key: &str) -> u64 {
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0)
         .saturating_mul(1024)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    struct MockReader {
+        files: HashMap<String, String>,
+    }
+
+    impl MockReader {
+        fn new(files: &[(&str, &str)]) -> Self {
+            Self {
+                files: files
+                    .iter()
+                    .map(|(path, content)| ((*path).to_string(), (*content).to_string()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl TextReader for MockReader {
+        fn read_to_string(&self, path: &Path) -> Result<String, io::Error> {
+            self.files
+                .get(path.to_string_lossy().as_ref())
+                .cloned()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing fixture"))
+        }
+
+        fn read_dir_names(&self, _path: &Path) -> Result<Vec<String>, io::Error> {
+            Ok(Vec::new())
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            self.files.contains_key(path.to_string_lossy().as_ref())
+        }
+    }
+
+    #[test]
+    fn parse_memory_reports_free_and_swap_used() {
+        let reader = MockReader::new(&[(
+            "/proc/meminfo",
+            "MemTotal:       1000 kB\nMemFree:         250 kB\nMemAvailable:    600 kB\nSwapTotal:       500 kB\nSwapFree:        300 kB\n",
+        )]);
+
+        let memory = parse_memory(&reader).unwrap();
+
+        assert_eq!(memory.total_bytes, 1000 * 1024);
+        assert_eq!(memory.free_bytes, 250 * 1024);
+        assert_eq!(memory.available_bytes, 600 * 1024);
+        assert_eq!(memory.used_bytes, 400 * 1024);
+        assert_eq!(memory.swap_total_bytes, 500 * 1024);
+        assert_eq!(memory.swap_free_bytes, 300 * 1024);
+        assert_eq!(memory.swap_used_bytes, 200 * 1024);
+    }
+
+    #[test]
+    fn parse_disk_reports_operation_counts() {
+        let reader = MockReader::new(&[(
+            "/proc/diskstats",
+            "   8       0 sda 100 0 2048 5 200 0 4096 10 0 0 0 0 0 0 0\n",
+        )]);
+
+        let disk = parse_disk(&reader).unwrap();
+
+        assert_eq!(disk.read_bytes, 2048 * 512);
+        assert_eq!(disk.write_bytes, 4096 * 512);
+        assert_eq!(disk.read_ops, 100);
+        assert_eq!(disk.write_ops, 200);
+    }
+
+    #[test]
+    fn parse_network_reports_packet_counts_and_skips_loopback() {
+        let reader = MockReader::new(&[(
+            "/proc/net/dev",
+            "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 1000 10 0 0 0 0 0 0 1000 10 0 0 0 0 0 0\n  eth0: 2048 20 0 0 0 0 0 0 4096 40 0 0 0 0 0 0\n",
+        )]);
+
+        let network = parse_network(&reader).unwrap();
+
+        assert_eq!(network.rx_bytes, 2048);
+        assert_eq!(network.tx_bytes, 4096);
+        assert_eq!(network.rx_packets, 20);
+        assert_eq!(network.tx_packets, 40);
+    }
 }
