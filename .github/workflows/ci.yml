@@ -70,13 +70,11 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
-      - name: Start a Docker daemon
+      - name: Check that a Docker daemon is reachable
         run: |
           set -eu
-          docker run -d --name anvil-dind --privileged \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            docker:dind --host=unix:///var/run/docker.sock
-          # Wait for the daemon to accept requests.
+          # The runner already runs a Docker daemon, so the test can talk to
+          # a real one without starting a nested daemon of its own.
           for _ in $(seq 1 30); do
             if docker version >/dev/null 2>&1; then
               echo "the daemon is up"
@@ -84,15 +82,22 @@ jobs:
             fi
             sleep 2
           done
-          docker logs anvil-dind
+          docker version
           exit 1
       - name: Run the container API test against the daemon
         env:
           ANVIL_CONTAINER_API_TEST: "1"
         run: |
-          set -eu
-          output=$(cargo test --bin anvil runtime::container::bollard -- --nocapture 2>&1)
+          set -uo pipefail
+          status=0
+          output=$(cargo test --bin anvil runtime::container::bollard -- --nocapture 2>&1) || status=$?
+          # The output is printed before anything else, so a failure shows
+          # what actually went wrong.
           echo "$output"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the container API test failed"
+            exit "$status"
+          fi
           # The test skips itself when it cannot reach a daemon, so the
           # marker is what tells us the real API path was exercised.
           if ! echo "$output" | grep -q "container api test ran against"; then
