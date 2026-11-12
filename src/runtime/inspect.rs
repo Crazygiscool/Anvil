@@ -1,43 +1,14 @@
 use crate::discovery::model::Diagnostic;
 use crate::platform::{CommandRunner, TextReader};
-use crate::runtime::model::{
-    ContainerRuntimeReport, ContainerSummary, InitReport, RuntimeInspection,
-};
+use crate::runtime::container::{ContainerClient, ContainerClients};
+use crate::runtime::model::{ContainerRuntimeReport, InitReport, RuntimeInspection};
 use crate::runtime::provider::ProviderIntegrationReport;
 use crate::runtime::provider::inspect_provider_integration;
 use crate::storage::inspect::find_binary;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub trait RuntimeBackend: Send + Sync {
     fn inspect(&self, reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeInspection;
-}
-
-pub struct DockerBackend;
-
-impl RuntimeBackend for DockerBackend {
-    fn inspect(&self, reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeInspection {
-        inspect_container_runtime(
-            reader,
-            runner,
-            "docker",
-            &["/var/run/docker.sock", "/run/docker.sock"],
-            &["version", "--format", "{{.Server.Version}}"],
-        )
-    }
-}
-
-pub struct PodmanBackend;
-
-impl RuntimeBackend for PodmanBackend {
-    fn inspect(&self, reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeInspection {
-        inspect_container_runtime(
-            reader,
-            runner,
-            "podman",
-            &["/run/podman/podman.sock"],
-            &["version", "--format", "{{.Server.Version}}"],
-        )
-    }
 }
 
 pub struct InitBackend;
@@ -48,113 +19,80 @@ impl RuntimeBackend for InitBackend {
     }
 }
 
-pub struct RuntimeCoordinator {
-    pub backends: Vec<Box<dyn RuntimeBackend>>,
-}
-
-impl RuntimeCoordinator {
-    pub fn new() -> Self {
-        Self {
-            backends: vec![
-                Box::new(DockerBackend),
-                Box::new(PodmanBackend),
-                Box::new(InitBackend),
-            ],
-        }
-    }
-}
-
-impl RuntimeBackend for RuntimeCoordinator {
-    fn inspect(&self, reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeInspection {
-        let mut report = RuntimeInspection::default();
-
-        for backend in &self.backends {
-            let partial = backend.inspect(reader, runner);
-            report.container_runtimes.extend(partial.container_runtimes);
-            report.init = if report.init.detected {
-                report.init.clone()
-            } else {
-                partial.init
-            };
-            report.diagnostics.extend(partial.diagnostics);
-        }
-
-        report.provider_integration = inspect_provider_integration(reader, runner);
-        report
-    }
-}
-
-pub fn inspect_runtime(reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeInspection {
-    RuntimeCoordinator::new().inspect(reader, runner)
-}
-
-fn inspect_container_runtime(
+/// Inspect the host, using the container API clients for the container
+/// runtimes.
+///
+/// The clients return structured data, so the container list does not have to
+/// be parsed out of command line output any more. The init system and the
+/// provider integration are still read through the command line, because
+/// they have no API.
+pub fn inspect_runtime_with_clients(
     reader: &dyn TextReader,
     runner: &dyn CommandRunner,
-    name: &str,
-    socket_candidates: &[&str],
-    version_args: &[&str],
+    clients: &ContainerClients,
 ) -> RuntimeInspection {
     let mut report = RuntimeInspection::default();
-    let binary = find_binary(reader, name);
 
-    for socket in socket_candidates {
-        let socket_path = PathBuf::from(socket);
-        if !reader.exists(&socket_path) {
+    for client in clients.clients() {
+        let (runtime_report, diagnostics) = inspect_container_client(client.as_ref());
+        report.container_runtimes.push(runtime_report);
+        report.diagnostics.extend(diagnostics);
+    }
+
+    // A runtime that is not installed at all is worth a diagnostic, so the
+    // report does not look like a host with an empty container list.
+    for runtime in ["docker", "podman"] {
+        if clients.get(runtime).is_some() {
             continue;
         }
-
-        let mut runtime = ContainerRuntimeReport {
-            name: name.to_string(),
-            socket: socket.to_string(),
-            binary: binary.as_ref().map(|path| path.display().to_string()),
-            daemon_reachable: false,
-            daemon_status: None,
-            containers: Vec::new(),
-        };
-
-        if let Some(program) = binary.as_ref() {
-            if let Ok(output) = runner.run(program, version_args) {
-                runtime.daemon_reachable = true;
-                runtime.daemon_status = Some(first_output(output));
-            } else {
-                push_diagnostic(
-                    &mut report.diagnostics,
-                    name,
-                    "daemon not reachable".to_string(),
-                );
-                continue;
-            }
-
-            if let Ok(output) = runner.run(
-                program,
-                &[
-                    "ps",
-                    "--format",
-                    "{{.ID}} {{.Names}} {{.Image}} {{.Status}}",
-                ],
-            ) && output.status.unwrap_or(1) == 0
-            {
-                for line in output.stdout.lines() {
-                    if let Some(container) = parse_container_line(line) {
-                        runtime.containers.push(container);
-                    }
-                }
-            }
+        if find_binary(reader, runtime).is_none() {
+            push_diagnostic(
+                &mut report.diagnostics,
+                runtime,
+                "binary not found".to_string(),
+            );
         }
-
-        report.container_runtimes.push(runtime);
     }
 
-    if binary.is_none() {
-        push_diagnostic(
-            &mut report.diagnostics,
-            name,
-            "binary not found".to_string(),
-        );
-    }
+    let init = InitBackend.inspect(reader, runner);
+    report.init = init.init;
+    report.diagnostics.extend(init.diagnostics);
 
+    report.provider_integration = inspect_provider_integration(reader, runner, clients);
     report
+}
+
+/// Inspect one container runtime through its client.
+fn inspect_container_client(
+    client: &dyn ContainerClient,
+) -> (ContainerRuntimeReport, Vec<Diagnostic>) {
+    let mut report = ContainerRuntimeReport {
+        name: client.runtime_name().to_string(),
+        socket: client.socket_path().unwrap_or_default().to_string(),
+        binary: client.binary_path().map(str::to_string),
+        daemon_reachable: false,
+        daemon_status: None,
+        containers: Vec::new(),
+    };
+    let mut diagnostics = Vec::new();
+
+    match client.list_containers() {
+        Ok(containers) => {
+            report.daemon_reachable = true;
+            report.daemon_status = client.daemon_status();
+            report.containers = containers;
+        }
+        Err(error) => {
+            let message = if client.is_reachable() {
+                error.to_string()
+            } else {
+                format!("daemon not reachable: {error}")
+            };
+            push_diagnostic(&mut diagnostics, client.runtime_name(), message);
+        }
+    }
+
+    (report, diagnostics)
 }
 
 fn inspect_init(reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeInspection {
@@ -244,21 +182,6 @@ fn inspect_init(reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeI
     }
 }
 
-fn parse_container_line(line: &str) -> Option<ContainerSummary> {
-    let fields: Vec<&str> = line.split_whitespace().collect();
-    if fields.len() < 4 {
-        return None;
-    }
-
-    let status = fields[3..].join(" ");
-    Some(ContainerSummary {
-        id: fields[0].to_string(),
-        name: fields[1].to_string(),
-        image: fields[2].to_string(),
-        status,
-    })
-}
-
 fn count_service_lines(output: &str) -> usize {
     output
         .lines()
@@ -280,4 +203,91 @@ fn push_diagnostic(diagnostics: &mut Vec<Diagnostic>, source: &str, error: Strin
         source: source.to_string(),
         error,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::container::{ContainerClients, MockContainerClient};
+    use crate::runtime::model::ContainerSummary;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// A reader that finds nothing on the host.
+    struct EmptyReader;
+
+    impl TextReader for EmptyReader {
+        fn read_to_string(&self, _path: &Path) -> Result<String, std::io::Error> {
+            Err(std::io::Error::other("missing fixture"))
+        }
+
+        fn read_dir_names(&self, _path: &Path) -> Result<Vec<String>, std::io::Error> {
+            Ok(Vec::new())
+        }
+
+        fn exists(&self, _path: &Path) -> bool {
+            false
+        }
+    }
+
+    /// A runner that answers nothing.
+    struct EmptyRunner;
+
+    impl CommandRunner for EmptyRunner {
+        fn run(
+            &self,
+            _program: &Path,
+            _args: &[&str],
+        ) -> Result<crate::platform::CommandOutput, std::io::Error> {
+            Err(std::io::Error::other("no command"))
+        }
+    }
+
+    fn container(name: &str) -> ContainerSummary {
+        ContainerSummary {
+            id: "abc123".to_string(),
+            name: name.to_string(),
+            image: "nginx:latest".to_string(),
+            status: "running".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_inspection_reports_the_containers_of_the_client() {
+        let mock = MockContainerClient::new("docker");
+        mock.set_containers(vec![container("web"), container("db")]);
+        let clients = ContainerClients::new(vec![Arc::new(mock)]);
+
+        let report = inspect_runtime_with_clients(&EmptyReader, &EmptyRunner, &clients);
+
+        assert_eq!(report.container_runtimes.len(), 1);
+        let runtime = &report.container_runtimes[0];
+        assert_eq!(runtime.name, "docker");
+        assert!(runtime.daemon_reachable);
+        assert_eq!(runtime.daemon_status.as_deref(), Some("mock"));
+        assert_eq!(runtime.containers.len(), 2);
+        assert_eq!(runtime.containers[0].name, "web");
+    }
+
+    #[test]
+    fn an_unreachable_daemon_is_reported_as_a_diagnostic() {
+        let mock = MockContainerClient::new("podman");
+        mock.set_unreachable();
+        let clients = ContainerClients::new(vec![Arc::new(mock)]);
+
+        let report = inspect_runtime_with_clients(&EmptyReader, &EmptyRunner, &clients);
+
+        assert_eq!(report.container_runtimes.len(), 1);
+        assert!(!report.container_runtimes[0].daemon_reachable);
+        assert!(report.container_runtimes[0].containers.is_empty());
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.source == "podman"
+                    && diagnostic.error.contains("not reachable")),
+            "the unreachable daemon should be reported: {:#?}",
+            report.diagnostics
+        );
+    }
 }

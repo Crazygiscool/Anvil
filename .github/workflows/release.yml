@@ -29,14 +29,24 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install ARM musl cross toolchain
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Install the musl cross toolchain
+        uses: messense/rust-musl-cross-action@v1
+        with:
+          target: ${{ matrix.target }}
 
       - name: Build static release binary
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Check that the binary is statically linked
+        run: |
+          set -eu
+          file "target/${{ matrix.target }}/release/anvil"
+          # A musl target must not carry a dynamic dependency; if it does,
+          # the release would not run on a minimal homelab host.
+          if ldd "target/${{ matrix.target }}/release/anvil" 2>&1 | grep -qv "not a dynamic executable\|statically linked"; then
+            ldd "target/${{ matrix.target }}/release/anvil"
+            exit 1
+          fi
 
       - name: Stage binary
         run: |

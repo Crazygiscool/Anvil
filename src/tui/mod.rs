@@ -73,6 +73,7 @@ pub async fn run_tui(
     events: broadcast::Sender<AppEvent>,
     reader: Arc<dyn crate::platform::TextReader + Send + Sync>,
     runner: Arc<dyn crate::platform::CommandRunner + Send + Sync>,
+    clients: crate::runtime::container::ContainerClients,
 ) -> crate::error::Result<()> {
     use crossterm::event::{Event, KeyEventKind, poll as poll_event, read as read_event};
     use crossterm::terminal::{
@@ -96,6 +97,7 @@ pub async fn run_tui(
     // outlives the telemetry task below.
     let refresh_reader = reader.clone();
     let refresh_runner = runner.clone();
+    let refresh_clients = clients.clone();
 
     let mut telemetry_task = tokio::spawn({
         let state = state.clone();
@@ -164,9 +166,14 @@ pub async fn run_tui(
                 let state = state.clone();
                 let reader = refresh_reader.clone();
                 let runner = refresh_runner.clone();
+                let clients = refresh_clients.clone();
                 refresh_task = Some(tokio::spawn(async move {
                     let collected = tokio::task::spawn_blocking(move || {
-                        crate::app::runtime::collect_host_state(reader.as_ref(), runner.as_ref())
+                        crate::app::runtime::collect_host_state(
+                            reader.as_ref(),
+                            runner.as_ref(),
+                            &clients,
+                        )
                     })
                     .await;
 

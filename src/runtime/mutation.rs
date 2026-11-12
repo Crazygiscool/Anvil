@@ -59,6 +59,67 @@ pub struct ContainerSpec {
     pub restart_policy: String,
 }
 
+/// The container API call that carries out a plan.
+///
+/// A plan always knows the command line that would do the same thing; when
+/// the runtime exposes an API, the API call is what actually runs, and the
+/// receipt says so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum ContainerApiAction {
+    Start { name: String },
+    Stop { name: String },
+    Restart { name: String },
+    Remove { name: String },
+    Create { spec: ContainerSpec },
+}
+
+impl ContainerApiAction {
+    /// The container the action applies to.
+    pub fn container_name(&self) -> &str {
+        match self {
+            Self::Start { name }
+            | Self::Stop { name }
+            | Self::Restart { name }
+            | Self::Remove { name } => name,
+            Self::Create { spec } => &spec.name,
+        }
+    }
+
+    /// A description of the call, in the way it is carried out.
+    pub fn describe(&self, runtime: &RuntimeKind) -> String {
+        let daemon = runtime_name(runtime);
+        match self {
+            Self::Start { name } => format!("{daemon} API: start container '{name}'"),
+            Self::Stop { name } => format!("{daemon} API: stop container '{name}'"),
+            Self::Restart { name } => format!("{daemon} API: restart container '{name}'"),
+            Self::Remove { name } => format!("{daemon} API: remove container '{name}'"),
+            Self::Create { spec } => format!(
+                "{daemon} API: create and start container '{}' from {}",
+                spec.name, spec.image
+            ),
+        }
+    }
+}
+
+/// The name of a runtime.
+pub fn runtime_name(runtime: &RuntimeKind) -> &'static str {
+    match runtime {
+        RuntimeKind::Docker => "docker",
+        RuntimeKind::Podman => "podman",
+    }
+}
+
+/// How a mutation was carried out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMechanism {
+    /// The command line was run.
+    Command,
+    /// The container API was called.
+    ContainerApi,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MutationTarget {
@@ -86,6 +147,8 @@ pub struct MutationPlan {
     pub requires_root: bool,
     pub dry_run_only: bool,
     pub summary: String,
+    /// The container API call that performs this plan, when there is one.
+    pub api_action: Option<ContainerApiAction>,
 }
 
 impl MutationPlan {
@@ -96,6 +159,21 @@ impl MutationPlan {
             line.push_str(arg);
         }
         line
+    }
+
+    /// A description of what the plan does, in the way it is carried out.
+    ///
+    /// A container plan is carried out through the API when the runtime
+    /// exposes one, so the description names the API call rather than the
+    /// command line that would do the same thing.
+    pub fn describe(&self) -> String {
+        match (&self.api_action, &self.target) {
+            (Some(action), MutationTarget::Container { runtime, .. }) => action.describe(runtime),
+            (Some(action), MutationTarget::ContainerInstall { runtime, .. }) => {
+                action.describe(runtime)
+            }
+            _ => self.command_line(),
+        }
     }
 }
 
@@ -146,6 +224,7 @@ impl MutationBackend for SystemdBackend {
             requires_root: true,
             dry_run_only: true,
             summary: format!("plan {} for systemd service {}", verb_name(*verb), name),
+            api_action: None,
         })
     }
 }
@@ -187,6 +266,7 @@ impl MutationBackend for OpenrcBackend {
             requires_root: true,
             dry_run_only: true,
             summary: format!("plan {} for OpenRC service {}", verb_name(*verb), name),
+            api_action: None,
         })
     }
 }
@@ -254,6 +334,13 @@ fn plan_container_mutation(
                 args.push("-f".to_string());
             }
             args.push(name.clone());
+            let api_action = match verb {
+                MutationVerb::Start => Some(ContainerApiAction::Start { name: name.clone() }),
+                MutationVerb::Stop => Some(ContainerApiAction::Stop { name: name.clone() }),
+                MutationVerb::Restart => Some(ContainerApiAction::Restart { name: name.clone() }),
+                MutationVerb::Remove => Some(ContainerApiAction::Remove { name: name.clone() }),
+                _ => None,
+            };
             Ok(MutationPlan {
                 target: target.clone(),
                 verb: *verb,
@@ -262,6 +349,7 @@ fn plan_container_mutation(
                 requires_root: true,
                 dry_run_only: true,
                 summary: format!("plan container {} for {}", command_verb, name),
+                api_action,
             })
         }
         MutationTarget::ContainerInstall { runtime, spec } => {
@@ -286,6 +374,7 @@ fn plan_container_mutation(
                     "plan install of container {} from {}",
                     spec.name, spec.image
                 ),
+                api_action: Some(ContainerApiAction::Create { spec: spec.clone() }),
             })
         }
         MutationTarget::Service { .. } => Err(AnvilError::Config(format!(
@@ -335,6 +424,8 @@ pub struct MutationExecutionReceipt {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    /// How the mutation was carried out.
+    pub mechanism: ExecutionMechanism,
 }
 #[derive(Debug, Clone)]
 pub struct MutationGateway {
@@ -653,6 +744,7 @@ impl MutationGateway {
                 exit_code: None,
                 stdout: String::new(),
                 stderr: String::new(),
+                mechanism: ExecutionMechanism::Command,
             });
         }
 
@@ -684,6 +776,7 @@ impl MutationGateway {
             exit_code: output.status,
             stdout: output.stdout,
             stderr: output.stderr,
+            mechanism: ExecutionMechanism::Command,
         })
     }
 

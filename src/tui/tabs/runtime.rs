@@ -183,7 +183,7 @@ impl RuntimeTab {
                     },
                     crate::tui::widgets::DetailField {
                         key: "Command".to_string(),
-                        value: receipt.plan.command_line(),
+                        value: receipt.plan.describe(),
                         style: None,
                     },
                     crate::tui::widgets::DetailField {
@@ -548,7 +548,7 @@ impl Tab for RuntimeTab {
             return;
         };
 
-        // Plan first so the confirmation shows the exact command that will run.
+        // Plan first so the confirmation shows exactly what will run.
         let plan = match state.plan_runtime_mutation(backend, &target, &verb) {
             Ok(plan) => plan,
             Err(error) => {
@@ -558,7 +558,7 @@ impl Tab for RuntimeTab {
             }
         };
 
-        let command = plan.command_line();
+        let command = plan.describe();
         self.pending = Some(PendingMutation {
             verb,
             label: label.clone(),

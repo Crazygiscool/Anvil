@@ -14,7 +14,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
-          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
@@ -25,6 +24,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
     steps:
@@ -33,17 +33,25 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-          components: rustfmt, clippy
+      - name: Install the musl cross toolchain
+        uses: messense/rust-musl-cross-action@v1
+        with:
+          target: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Install Linux ARM linker
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Build release
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }}
+      - name: Check that the binary is statically linked
+        run: |
+          set -eu
+          file "target/${{ matrix.target }}/release/anvil"
+          # A musl target must not carry a dynamic dependency; if it does,
+          # the release would not run on a minimal homelab host.
+          if ldd "target/${{ matrix.target }}/release/anvil" 2>&1 | grep -qv "not a dynamic executable\|statically linked"; then
+            ldd "target/${{ matrix.target }}/release/anvil"
+            exit 1
+          fi
       - name: Stage artifact
         run: |
           mkdir -p dist
@@ -52,4 +60,42 @@ jobs:
         with:
           name: anvil-${{ matrix.target }}
           path: dist/anvil-${{ matrix.target }}
-EOF
+
+  container-api:
+    name: container api against a real daemon
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Start a Docker daemon
+        run: |
+          set -eu
+          docker run -d --name anvil-dind --privileged \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            docker:dind --host=unix:///var/run/docker.sock
+          # Wait for the daemon to accept requests.
+          for _ in $(seq 1 30); do
+            if docker version >/dev/null 2>&1; then
+              echo "the daemon is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs anvil-dind
+          exit 1
+      - name: Run the container API test against the daemon
+        env:
+          ANVIL_CONTAINER_API_TEST: "1"
+        run: |
+          set -eu
+          output=$(cargo test --bin anvil runtime::container::bollard -- --nocapture 2>&1)
+          echo "$output"
+          # The test skips itself when it cannot reach a daemon, so the
+          # marker is what tells us the real API path was exercised.
+          if ! echo "$output" | grep -q "container api test ran against"; then
+            echo "::error::the container API test did not run against the daemon"
+            exit 1
+          fi

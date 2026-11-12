@@ -357,7 +357,7 @@ impl CatalogTab {
                     },
                     crate::tui::widgets::DetailField {
                         key: "Command".to_string(),
-                        value: receipt.plan.command_line(),
+                        value: receipt.plan.describe(),
                         style: None,
                     },
                     crate::tui::widgets::DetailField {
@@ -671,7 +671,7 @@ impl Tab for CatalogTab {
             }
         };
 
-        let command = plan.command_line();
+        let command = plan.describe();
         let dry_run = state.mutation_mode() != Some(MutationMode::Execute);
         let message = if dry_run {
             format!(

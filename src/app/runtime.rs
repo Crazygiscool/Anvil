@@ -4,6 +4,7 @@ use crate::app::state::AppState;
 use crate::config::Config;
 use crate::error::Result;
 use crate::platform::{CommandRunner, TextReader};
+use crate::runtime::container::ContainerClients;
 use crate::tui::run_tui;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +14,8 @@ pub struct AppRuntime {
     pub state: Arc<RwLock<AppState>>,
     pub reader: Arc<dyn TextReader + Send + Sync>,
     pub runner: Arc<dyn CommandRunner + Send + Sync>,
+    /// The container clients, built once and reused.
+    pub clients: ContainerClients,
     events: broadcast::Sender<AppEvent>,
 }
 
@@ -26,10 +29,13 @@ impl AppRuntime {
     ) -> Self {
         let (sender, _) = broadcast::channel(1024);
         let state = AppState::bootstrap(config, access, manifest_paths);
+        let clients =
+            crate::runtime::container::discover_clients(reader.as_ref(), Arc::clone(&runner));
         Self {
             state: Arc::new(RwLock::new(state)),
             reader,
             runner,
+            clients,
             events: sender,
         }
     }
@@ -48,6 +54,7 @@ impl AppRuntime {
             self.events.clone(),
             self.reader.clone(),
             self.runner.clone(),
+            self.clients.clone(),
         )
         .await
     }
@@ -57,6 +64,7 @@ impl AppRuntime {
 pub fn collect_host_state(
     reader: &dyn TextReader,
     runner: &dyn CommandRunner,
+    clients: &ContainerClients,
 ) -> (
     crate::discovery::DiscoveryReport,
     crate::storage::StorageInspection,
@@ -65,6 +73,6 @@ pub fn collect_host_state(
     (
         crate::discovery::all(reader, runner),
         crate::storage::inspect_storage(reader, runner),
-        crate::runtime::inspect_runtime(reader, runner),
+        crate::runtime::inspect_runtime_with_clients(reader, runner, clients),
     )
 }

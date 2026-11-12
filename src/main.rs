@@ -65,17 +65,22 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
     runtime.state.write().await.discovery = Some(discovery::all(reader.as_ref(), &*command_runner));
     runtime.state.write().await.storage =
         Some(storage::inspect_storage(reader.as_ref(), &*command_runner));
-    runtime.state.write().await.runtime =
-        Some(runtime::inspect_runtime(reader.as_ref(), &*command_runner));
-    runtime.state.write().await.mutation_controller = Some(runtime::MutationController::new(
-        access,
-        if std::env::var("ANVIL_ALLOW_MUTATION").ok().as_deref() == Some("1") {
-            runtime::mutation::MutationMode::Execute
-        } else {
-            runtime::mutation::MutationMode::DryRun
-        },
-        command_runner.clone(),
+    runtime.state.write().await.runtime = Some(runtime::inspect_runtime_with_clients(
+        reader.as_ref(),
+        &*command_runner,
+        &runtime.clients,
     ));
+    runtime.state.write().await.mutation_controller =
+        Some(runtime::MutationController::with_clients(
+            access,
+            if std::env::var("ANVIL_ALLOW_MUTATION").ok().as_deref() == Some("1") {
+                runtime::mutation::MutationMode::Execute
+            } else {
+                runtime::mutation::MutationMode::DryRun
+            },
+            command_runner.clone(),
+            runtime.clients.clone(),
+        ));
     runtime.state.write().await.plugins = Some(crate::plugins::WasmPluginEngine::new().scan(
         reader.as_ref(),
         &crate::plugins::default_plugin_directories(access::effective_uid()),
@@ -255,7 +260,7 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
         }
         Some(Commands::Catalog { command }) => {
             let runner: Arc<dyn platform::CommandRunner + Send + Sync> = command_runner.clone();
-            run_catalog(command, access, &runner).await
+            run_catalog(command, access, &runner, &runtime.clients).await
         }
     }
 }
@@ -265,6 +270,7 @@ async fn run_catalog(
     command: CatalogCommands,
     access: access::AccessContext,
     runner: &Arc<dyn platform::CommandRunner + Send + Sync>,
+    clients: &runtime::ContainerClients,
 ) -> anyhow::Result<()> {
     match command {
         CatalogCommands::List { json, category } => {
@@ -330,8 +336,8 @@ async fn run_catalog(
             let target = catalog::install_target(entry)?;
 
             if dry_run {
-                // A dry run only prints the command that would run. It never
-                // touches the host, so it does not need the mutation gate.
+                // A dry run only prints what would run. It never touches the
+                // host, so it does not need the mutation gate.
                 let plan = catalog::install_plan(entry)?;
                 if json {
                     println!(
@@ -344,20 +350,26 @@ async fn run_catalog(
                                 "program": plan.program,
                                 "args": plan.args,
                                 "command": plan.command_line(),
+                                "action": plan.describe(),
                                 "summary": plan.summary,
                             },
                         }))?
                     );
                 } else {
                     println!("catalog install id={}", entry.id);
+                    println!("  action: {}", plan.describe());
                     println!("  command: {}", plan.command_line());
                     println!("  result: planned (dry-run), nothing was changed");
                 }
                 return Ok(());
             }
 
-            let controller =
-                runtime::MutationController::new(access, mutation_mode(false), Arc::clone(runner));
+            let controller = runtime::MutationController::with_clients(
+                access,
+                mutation_mode(false),
+                Arc::clone(runner),
+                clients.clone(),
+            );
             let receipt =
                 controller.execute(backend, &target, &runtime::mutation::MutationVerb::Install)?;
 
@@ -367,6 +379,7 @@ async fn run_catalog(
             }
 
             println!("catalog install id={}", entry.id);
+            println!("  action: {}", receipt.plan.describe());
             println!("  command: {}", receipt.plan.command_line());
             if receipt.execution.executed {
                 println!("  result: executed");
