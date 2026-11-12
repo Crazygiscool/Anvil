@@ -1,66 +1,141 @@
 # AGENTS.md
 
-Anvil is a Rust homelab management/provisioning TUI + headless daemon.
+Anvil is a Rust homelab management/provisioning TUI + headless daemon. Single static binary targeting Linux only.
 
 ## Toolchain
 
-- Rust is managed by `rust-toolchain.toml`; the toolchain has `rustfmt` and `clippy`.
-- Use the stable toolchain binaries if shell tools are unavailable.
-- Target Linux only: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`.
+- Rust managed by `rust-toolchain.toml` (stable, with `clippy` and `rustfmt`)
+- Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`
 
 ## Commands
 
-- Format: `cargo fmt --check`
-- Lint: `cargo clippy --all-targets -- -D warnings`
-- Tests: `cargo test`
-- Single test: `cargo test --test cli -- apply_dry_run_validates_versioned_manifest`
-- Build: `cargo build`
-- Release build: `cargo build --release`
-- x86_64 release: `cargo build --release --target x86_64-unknown-linux-musl`
-- aarch64 release: `cargo build --release --target aarch64-unknown-linux-musl`
-- Help: `cargo run -- --help`
-- TUI mode: `cargo run`
-- Provisioning dry run: `cargo run -- apply --manifest /etc/anvil/manifest.toml --dry-run`
-- Provisioning dry run JSON: `cargo run -- apply --manifest /etc/anvil/manifest.toml --dry-run --json`
-- Read-only discovery: `cargo run -- discover`
-- JSON discovery: `cargo run -- discover --json`
-- Runtime inspection: `cargo run -- runtime`
-- Plugin inventory: `cargo run -- plugins`
-- JSON plugin inventory: `cargo run -- plugins --json`
+```sh
+# Development
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo test --test cli -- apply_dry_run_validates_versioned_manifest  # single test
 
-## Current Implementation State
+# Build
+cargo build
+cargo build --release
+cargo build --release --target x86_64-unknown-linux-musl
+cargo build --release --target aarch64-unknown-linux-musl
 
-- Native runtime installation helper: `sh scripts/install-runtimes.sh`
-- Phase 1--14: CLI, config, privilege detection, logging, event loop, app state scaffolding, read-only host discovery, telemetry sampling/state updates, read-only storage and runtime inspection, provider integration, declarative provisioning plan validation, interactive TUI rendering, Wasm plugin scanning, lifecycle mutation planning, gated mutation execution, provider command execution, centralized mutation controller/state orchestration, release documentation, build verification, and integration tests are implemented.
-- `apply` requires `--dry-run`; it never mutates system state.
-- `discover`, `discover --json`, `storage`, and `runtime` are read-only.
-- Plugin report diagnostics distinguish invalid plugins without failing inventory.
-- Container integrations and init-system execution remain capability-gated and dry-run by default; Wasm plugin loading uses restricted capabilities.
-- Remove any pre-implementation assumptions before continuing.
+# Run modes
+cargo run -- --help
+cargo run                              # TUI mode (default)
+cargo run -- --read-only               # force read-only
+cargo run -- discover                  # host discovery
+cargo run -- discover --json
+cargo run -- storage                   # storage inspection
+cargo run -- storage --json
+cargo run -- runtime                   # container/init runtime inspection
+cargo run -- runtime --json
+cargo run -- plugins                   # Wasm plugin inventory
+cargo run -- plugins --json
+cargo run -- apply --manifest /etc/anvil/manifest.toml --dry-run
+cargo run -- apply --manifest /etc/anvil/manifest.toml --dry-run --json
+
+# Application catalog
+cargo run -- catalog list
+cargo run -- catalog list --json --category media
+cargo run -- catalog show portainer
+cargo run -- catalog install portainer --dry-run
+cargo run -- catalog update --from-file ./catalog.toml
+
+# Native runtime installer (optional Docker/Podman)
+sh scripts/install-runtimes.sh --dry-run
+sh scripts/install-runtimes.sh --runtime podman --execute --yes
+```
+
+## Key Constraints
+
+- `apply` **requires** `--dry-run`; never mutates system state
+- `discover`, `storage`, `runtime`, `plugins` are read-only
+- TUI mode: logs go to file only, never stdout
+- Root can mutate; non-root runs read-only unless `--read-only` forced
+- Mutation gated by `ANVIL_ALLOW_MUTATION=1` env var (not exposed via CLI)
 
 ## Architecture
 
-- Single binary crate; entry point is `src/main.rs`.
-- Discovery code lives under `src/discovery` and probes through traits in `src/platform/traits.rs`.
-- Storage inspection lives under `src/storage` and uses trait backends.
-- Runtime inspection lives under `src/runtime` and uses trait backends.
-- Plugin scanning lives under `src/plugins` and uses Wasmtime to load sandboxed `.wasm` manifests.
-- All later integration behavior must be hidden behind traits and tested with mocks.
-- Interactive TUI mode is the default when `anvil` is invoked with no subcommand.
-- Privilege model: root can mutate, non-root runs read-only unless `--read-only` is forced.
+- Single binary crate; entry point `src/main.rs`
+- Discovery: `src/discovery` via traits in `src/platform/traits.rs`
+- Storage inspection: `src/storage` with trait backends
+- Runtime inspection: `src/runtime` with trait backends
+- Container runtimes: `src/runtime/container` — the `ContainerClient` trait, the
+  `bollard` API client, the command line fallback client, and the mock client
+- Catalog: `src/catalog` — index model, index loading/merging/validation, and
+  the install planner that reuses the mutation stack
+- Plugin scanning: `src/plugins` uses Wasmtime for sandboxed `.wasm` manifests
+- All integration behavior hidden behind traits, tested with mocks
+- Config loader: `src/config/loader.rs` (root `/etc/anvil/config.toml`, user `XDG_CONFIG_HOME`)
 
-## Paths And Standards
+## Current Implementation State
 
-- Config: root `/etc/anvil/config.toml`; user mode follows `XDG_CONFIG_HOME/anvil/config.toml` and the FHS/XDG defaults.
-- Manifests: `/etc/anvil/manifest.toml` or a directory of `*.toml`.
-- Logs: `/var/log/anvil/anvil.log` when root; otherwise XDG state home, then `~/.local/state/anvil/anvil.log`.
-- Provisioning manifests require an explicit top-level `version = 1`.
-- Plugin manifests use `api_version = 1` and `.wasm` libraries under configured plugin directories.
+- `apply` requires `--dry-run`; it never mutates system state.
+- `discover`, `storage`, `runtime`, `plugins` and `catalog list/show` are read-only.
+- `catalog install` without `--dry-run` goes through the mutation controller, so
+  it needs root **and** `ANVIL_ALLOW_MUTATION=1`.
+- Container state is read through the Docker API when the runtime exposes a
+  socket, and through the runtime's command line otherwise.
+- The UI never shows simulated data: every number comes from a real read, and
+  every mutation receipt names the mechanism that carried it out.
+- Plugin report diagnostics distinguish invalid plugins without failing inventory.
+- The Wasm plugin host does not expose host functions yet; the sandbox is
+  capability-gated and versioned.
 
-## Verification Expectations
+## Phase Ledger
 
-- Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` after code changes.
-- Run both target release builds before publishing artifacts.
-- Log changes must never write to terminal stdout in TUI mode.
-- State mutation must stay centralized and permission-gated.
-- Host API capabilities exposed to plugins must remain restricted and versioned.
+Phases 1–14 are the only record of the original roadmap, so they are kept here.
+
+| Phase | Scope | Commit |
+|-------|-------|--------|
+| 1–4 | Core foundation: CLI, config loader, privilege detection, logging, event loop, app state scaffolding | `3d2c5ac` |
+| 5–7 | Read-only host discovery, telemetry sampling, storage and runtime inspection, provider integration, declarative provisioning plan validation, interactive TUI rendering | `7fba061` |
+| 8 | Wasm plugin scanning through Wasmtime with restricted capabilities | `91bf7e0` |
+| 9 | Release packaging, CI workflow, target verification | `41899d2` |
+| 10 | Trait-backed lifecycle mutation planning | `890deec` |
+| 11 | Gated lifecycle and provider mutation execution | `ecddd2a` |
+| 12 | Provider verification, rollback helpers, safe execution controller | `eaa8a4d`, `9d7d0d0` |
+| 13 | Centralized runtime mutation planning and state orchestration | `fb60f0a`, `ebc17f8` |
+| 14 | Optional JSON output, storage-compatible provider plans, provider status contract | `196cff7`, `fe13a82` |
+| 15 | TUI rewrite: tab manager, reusable widgets, honest telemetry and storage tabs | `8fe5e2c`, `b90c929` |
+| 16 | TUI mutation wiring: container lifecycle, live refresh, audit ledger | `378a945` |
+| 17 | Real catalog index, validation, `anvil catalog` CLI, catalog tab | `9e3828d`, `9bcac18` |
+| 18 | Container API through `bollard`, structured inspection, client caching, CI smoke job | `a9d2e07` |
+| 19 | Docs and release alignment: architecture, roadmap, catalog, plugins, README, v0.2.0 | — |
+
+## Paths & Standards
+
+| Type | Path |
+|------|------|
+| Config (root) | `/etc/anvil/config.toml` |
+| Config (user) | `$XDG_CONFIG_HOME/anvil/config.toml` |
+| Manifests | `/etc/anvil/manifest.toml` or dir of `*.toml` |
+| Catalog index (root) | `/etc/anvil/catalog.toml` |
+| Catalog index (user) | `$XDG_CONFIG_HOME/anvil/catalog.toml` |
+| Plugins | `/etc/anvil/plugins`, `$XDG_CONFIG_HOME/anvil/plugins` |
+| Logs (root) | `/var/log/anvil/anvil.log` |
+| Logs (user) | `$XDG_STATE_HOME/anvil/anvil.log` |
+
+- Provisioning manifests: `version = 1` (top-level, required)
+- Plugin manifests: `api_version = 1`, `.wasm` files in plugin dirs
+- Catalog index: `version = 1` (top-level, required)
+
+## Verification Checklist
+
+After changes, run:
+1. `cargo fmt --check`
+2. `cargo clippy --all-targets -- -D warnings`
+3. `cargo test`
+4. Both release targets before publishing: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`
+
+## Release
+
+```sh
+./scripts/install.sh              # install latest GitHub release
+./scripts/install.sh --from-local # install locally built binary
+```
+
+Release binaries at `target/<target>/release/anvil`.
