@@ -58,6 +58,51 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
+          name: Anvil ${{ github.ref_name }}
+          body: |
+            Anvil is a single static binary for Linux that reads the state of a
+            homelab host and lets you change it, deliberately.
+
+            ## What is in this release
+
+            - **A rebuilt terminal interface.** Six tabs — Overview, Discovery,
+              Storage, Runtime, Telemetry and Catalog — built on a tab manager
+              and a reusable widget toolkit. Every number on screen comes from
+              a real read of the host.
+            - **Real mutations.** Container and service lifecycle actions go
+              through a single controller: plan, confirm, execute, verify, and
+              record a receipt with a rollback plan. A mutation needs root *and*
+              `ANVIL_ALLOW_MUTATION=1` in the environment.
+            - **A real application catalog.** A versioned TOML index with
+              validation, an `anvil catalog` CLI, and a catalog tab. Installs
+              are routed through the same controller as every other change.
+            - **A real container API.** Docker and Podman are reached through
+              the Docker API over their Unix socket (`bollard`, rustls), with
+              the command line kept as the fallback for daemons without a
+              socket. The receipt records which mechanism carried a change out.
+            - **Honest data.** The interface no longer shows a fabricated
+              process list or an unimplemented storage action menu.
+
+            ## Install
+
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/Crazygiscool/Anvil/main/scripts/install.sh | sh
+            ```
+
+            ## Verify
+
+            Both binaries are statically linked against musl:
+
+            ```sh
+            file anvil-x86_64-unknown-linux-musl
+            sha256sum -c anvil-x86_64-unknown-linux-musl.sha256
+            ```
+
+            ## Safety
+
+            `apply` requires `--dry-run` and never changes the host. The
+            inspection commands are read-only. Real mutations need root and
+            `ANVIL_ALLOW_MUTATION=1`.
           files: |
             dist/anvil-${{ matrix.target }}
             dist/anvil-${{ matrix.target }}.sha256

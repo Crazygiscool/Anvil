@@ -3,7 +3,7 @@
 Anvil is a single-binary homelab management tool for Linux. It reads the state
 of a host — storage, network, init system, container runtimes, telemetry — and
 presents it as a terminal dashboard, a set of JSON reports, and a small
-catalogue of applications you can install.
+catalog of applications you can install.
 
 This document describes what Anvil actually does today. Where a feature is
 planned but not built, it says so explicitly rather than describing an
@@ -121,7 +121,7 @@ src/
 │   ├── mutation.rs         Backends, plans, receipts, verification, rollback
 │   └── controller.rs       The gated execution controller
 │
-├── catalog/                The application catalogue
+├── catalog/                The application catalog
 │   ├── model.rs            The index and entry structures
 │   ├── index.rs            Built-in index, loading, merging, validation
 │   └── install.rs           Entry → container spec → mutation plan
@@ -148,7 +148,7 @@ src/
     │   ├── storage.rs      Pools, datasets and mounts
     │   ├── runtime.rs      Containers and init services, with mutations
     │   ├── telemetry.rs    Live metrics
-    │   └── catalog.rs      The catalogue, with installs
+    │   └── catalog.rs      The catalog, with installs
     └── widgets/            Reusable widgets
         ├── list.rs         Selectable list with filter and sort
         ├── detail.rs       Structured detail pane
@@ -326,9 +326,9 @@ succeed but did not take effect is visible.
 
 ---
 
-## 7. The catalogue
+## 7. The catalog
 
-The catalogue is a data file, not code. `src/catalog/index.rs` holds a built-in
+The catalog is a data file, not code. `src/catalog/index.rs` holds a built-in
 index; a user file in `/etc/anvil/catalog.toml` or
 `$XDG_CONFIG_HOME/anvil/catalog.toml` is merged on top of it, replacing
 entries with the same id and adding new ones.
@@ -336,13 +336,13 @@ entries with the same id and adding new ones.
 An entry becomes a `ContainerSpec`, the spec becomes a `MutationTarget`, and
 the backend produces the same `MutationPlan` as every other mutation. The
 privilege gate, the receipt, the verification and the rollback therefore apply
-to a catalogue install exactly as they do to a container restart.
+to a catalog install exactly as they do to a container restart.
 
 `anvil catalog install --dry-run` plans without touching the host and without
 needing root. Without `--dry-run` it goes through the controller, so it needs
 root and `ANVIL_ALLOW_MUTATION=1`.
 
-The TUI's catalogue tab reads the same index. The installed state of an entry
+The TUI's catalog tab reads the same index. The installed state of an entry
 is derived from the runtime inspection — a container whose name matches the
 entry id — and is rebuilt on every refresh, so it always reflects the host.
 
@@ -363,7 +363,7 @@ truth for tab identity: the tab bar and the rendered view cannot disagree.
 | Storage | Pools, datasets, subvolumes, volumes and mounts |
 | Runtime | Containers and init services, with start/stop/restart/remove actions |
 | Telemetry | Live CPU, memory, disk and network counters |
-| Catalog | The catalogue, with install and uninstall actions |
+| Catalog | The catalog, with install and uninstall actions |
 
 Each tab implements the `Tab` trait, which optionally exposes an action menu, a
 confirmation dialog and a progress overlay. The manager gives those overlays
@@ -423,7 +423,7 @@ figure, a container list — is not available to a plugin today. See
 | `tokio` | The async runtime behind the event loop, the timers and the refresh task |
 | `bollard` | The Docker API client (rustls, no native-tls, so the musl targets stay static) |
 | `futures-util` | Driving the image-pull stream |
-| `serde` / `serde_json` / `toml` | Config, manifests, the catalogue index and the JSON reports |
+| `serde` / `serde_json` / `toml` | Config, manifests, the catalog index and the JSON reports |
 | `clap` | The command tree |
 | `wasmtime` | The sandboxed plugin runtime |
 | `thiserror` / `anyhow` | Error types and context |
@@ -442,10 +442,10 @@ Stated plainly, so the documentation does not overpromise:
   written.
 - **No daemon mode.** `anvil daemon` does not exist; the TUI is the only
   interactive mode.
-- **No remote catalogue.** The index is a local file. Fetching one over the
+- **No remote catalog.** The index is a local file. Fetching one over the
   network needs a signed-index format and a TLS client, and neither is built.
 - **No plugin host API.** Plugins are sandboxed but cannot ask the host for
   anything.
 - **No drive management or process table.** The telemetry tab deliberately
   shows counters instead of inventing a process list.
-- **No Compose support.** The catalogue installs single containers.
+- **No Compose support.** The catalog installs single containers.
