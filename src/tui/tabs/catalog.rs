@@ -1,10 +1,23 @@
-//! Catalog tab - 1-click application installation.
+//! Catalog tab - install applications from the real catalog index.
+//!
+//! The tab shows the entries of the catalog index that lives on disk
+//! (`/etc/anvil/catalog.toml` or `$XDG_CONFIG_HOME/anvil/catalog.toml`
+//! merged on top of the built-in defaults). The installed state of an entry
+//! is derived from the runtime inspection, never from a local flag, and every
+//! install or removal is routed through the mutation controller so the
+//! privilege gate, the receipt, the verification and the rollback plan all
+//! apply.
 
 use crate::app::state::AppState;
+use crate::catalog::model::{CatalogEntry, CatalogIndex};
+use crate::catalog::{backend_for, install_target, runtime_kind};
+use crate::runtime::controller::ControllerReceipt;
+use crate::runtime::mutation::{MutationBackend, MutationMode, MutationTarget, MutationVerb};
 use crate::tui::ActiveTab;
 use crate::tui::tabs::Tab;
 use crate::tui::widgets::{
-    Action, ActionMenu, ConfirmDialog, DetailPane, ListWidget, ProgressOverlay, SelectableItem,
+    Action, ActionMenu, ConfirmDialog, DetailPane, DialogResult, ListWidget, ProgressOverlay,
+    SelectableItem,
 };
 use crossterm::event::KeyEvent;
 use ratatui::{
@@ -14,38 +27,41 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
+/// The label of the pseudo-category that shows every entry.
+const ALL_CATEGORIES: &str = "All";
+
+/// One catalog entry as shown in the list.
 #[derive(Debug, Clone)]
 struct CatalogApp {
-    id: String,
-    name: String,
-    description: String,
-    category: String,
-    image: String,
-    ports: Vec<String>,
-    volumes: Vec<String>,
-    /// Whether the app is known to be installed on this host.
+    entry: CatalogEntry,
+    /// Whether a container with this entry's id exists on the host.
     ///
-    /// This stays false until the catalog backend can query the container
-    /// runtime; the tab must not claim an app is installed without knowing it.
+    /// This is derived from the runtime inspection on every rebuild; it is
+    /// never a local flag that the tab flips on itself.
     installed: bool,
+    /// The runtime the container was found in, when it is installed.
+    installed_runtime: Option<String>,
 }
 
 impl SelectableItem for CatalogApp {
     fn id(&self) -> String {
-        self.id.clone()
+        self.entry.id.clone()
     }
 
     fn title(&self) -> String {
         let status = if self.installed { " ✓" } else { "" };
-        format!("{}{}", self.name, status)
+        format!("{}{}", self.entry.name, status)
     }
 
     fn subtitle(&self) -> Option<String> {
-        Some(format!("{} | {}", self.category, self.image))
+        Some(format!(
+            "{} | {} | {}",
+            self.entry.category, self.entry.runtime, self.entry.image
+        ))
     }
 
     fn prefix(&self) -> Option<&str> {
-        Some(match self.category.as_str() {
+        Some(match self.entry.category.as_str() {
             "management" => "⚙️",
             "media" => "🎬",
             "devops" => "🔧",
@@ -66,8 +82,21 @@ impl SelectableItem for CatalogApp {
     }
 
     fn search_text(&self) -> String {
-        format!("{} {} {}", self.name, self.description, self.category)
+        format!(
+            "{} {} {} {}",
+            self.entry.name, self.entry.description, self.entry.category, self.entry.image
+        )
     }
+}
+
+/// A catalog mutation waiting for the user's confirmation.
+#[derive(Clone)]
+struct PendingMutation {
+    verb: MutationVerb,
+    label: String,
+    command: String,
+    backend: &'static dyn MutationBackend,
+    target: MutationTarget,
 }
 
 pub struct CatalogTab {
@@ -76,8 +105,15 @@ pub struct CatalogTab {
     action_menu: ActionMenu,
     confirm_dialog: ConfirmDialog,
     progress: ProgressOverlay,
+    /// The loaded catalog index.
+    index: Option<CatalogIndex>,
+    /// Why the index could not be loaded, if it could not.
+    index_error: Option<String>,
+    /// The category filter: `All` plus the categories present in the index.
     categories: Vec<String>,
     selected_category: usize,
+    pending: Option<PendingMutation>,
+    last_receipt: Option<ControllerReceipt>,
     show_help: bool,
 }
 
@@ -87,9 +123,9 @@ impl CatalogTab {
             .with_empty_message("No apps in the catalog.");
         let detail = DetailPane::new("App Details");
         let action_menu = ActionMenu::new("App Actions", Vec::new());
-        let confirm_dialog = ConfirmDialog::new("Preview Install", "Install this application?")
-            .with_labels("Preview", "Cancel");
-        let progress = ProgressOverlay::new("Install Preview");
+        let confirm_dialog =
+            ConfirmDialog::new("Confirm", "Are you sure?").with_labels("Run", "Cancel");
+        let progress = ProgressOverlay::new("Catalog Action");
 
         Self {
             apps,
@@ -97,301 +133,362 @@ impl CatalogTab {
             action_menu,
             confirm_dialog,
             progress,
-            categories: vec![
-                "All".to_string(),
-                "management".to_string(),
-                "media".to_string(),
-                "devops".to_string(),
-                "database".to_string(),
-                "networking".to_string(),
-                "monitoring".to_string(),
-                "backup".to_string(),
-                "other".to_string(),
-            ],
+            index: None,
+            index_error: None,
+            categories: vec![ALL_CATEGORIES.to_string()],
             selected_category: 0,
+            pending: None,
+            last_receipt: None,
             show_help: false,
         }
     }
 
-    fn load_catalog(&mut self) {
-        // Built-in catalog - in reality this would come from a file or remote index
-        let apps = vec![
-            CatalogApp {
-                id: "portainer".to_string(),
-                name: "Portainer".to_string(),
-                description: "Container management UI for Docker, Kubernetes, and edge".to_string(),
-                category: "management".to_string(),
-                image: "portainer/portainer-ce:latest".to_string(),
-                ports: vec!["9000:9000".to_string(), "9443:9443".to_string()],
-                volumes: vec![
-                    "/var/run/docker.sock:/var/run/docker.sock".to_string(),
-                    "portainer_data:/data".to_string(),
-                ],
-                installed: false,
-            },
-            CatalogApp {
-                id: "watchtower".to_string(),
-                name: "Watchtower".to_string(),
-                description: "Automatically update running Docker containers".to_string(),
-                category: "devops".to_string(),
-                image: "containrrr/watchtower:latest".to_string(),
-                ports: vec![],
-                volumes: vec!["/var/run/docker.sock:/var/run/docker.sock".to_string()],
-                installed: false,
-            },
-            CatalogApp {
-                id: "pihole".to_string(),
-                name: "Pi-hole".to_string(),
-                description: "Network-wide ad blocking via DNS".to_string(),
-                category: "networking".to_string(),
-                image: "pihole/pihole:latest".to_string(),
-                ports: vec![
-                    "53:53/tcp".to_string(),
-                    "53:53/udp".to_string(),
-                    "80:80".to_string(),
-                ],
-                volumes: vec![
-                    "pihole_etc:/etc/pihole".to_string(),
-                    "pihole_dns:/etc/dnsmasq.d".to_string(),
-                ],
-                installed: false,
-            },
-            CatalogApp {
-                id: "grafana".to_string(),
-                name: "Grafana".to_string(),
-                description: "Open-source analytics and monitoring dashboard".to_string(),
-                category: "monitoring".to_string(),
-                image: "grafana/grafana:latest".to_string(),
-                ports: vec!["3000:3000".to_string()],
-                volumes: vec!["grafana_data:/var/lib/grafana".to_string()],
-                installed: false,
-            },
-            CatalogApp {
-                id: "prometheus".to_string(),
-                name: "Prometheus".to_string(),
-                description: "Monitoring system and time series database".to_string(),
-                category: "monitoring".to_string(),
-                image: "prom/prometheus:latest".to_string(),
-                ports: vec!["9090:9090".to_string()],
-                volumes: vec!["prometheus_data:/prometheus".to_string()],
-                installed: false,
-            },
-            CatalogApp {
-                id: "postgres".to_string(),
-                name: "PostgreSQL".to_string(),
-                description: "Advanced open-source relational database".to_string(),
-                category: "database".to_string(),
-                image: "postgres:16".to_string(),
-                ports: vec!["5432:5432".to_string()],
-                volumes: vec!["postgres_data:/var/lib/postgresql/data".to_string()],
-                installed: false,
-            },
-            CatalogApp {
-                id: "redis".to_string(),
-                name: "Redis".to_string(),
-                description: "In-memory data structure store".to_string(),
-                category: "database".to_string(),
-                image: "redis:7-alpine".to_string(),
-                ports: vec!["6379:6379".to_string()],
-                volumes: vec!["redis_data:/data".to_string()],
-                installed: false,
-            },
-            CatalogApp {
-                id: "jellyfin".to_string(),
-                name: "Jellyfin".to_string(),
-                description: "Free software media system".to_string(),
-                category: "media".to_string(),
-                image: "jellyfin/jellyfin:latest".to_string(),
-                ports: vec!["8096:8096".to_string()],
-                volumes: vec![
-                    "jellyfin_config:/config".to_string(),
-                    "jellyfin_cache:/cache".to_string(),
-                    "media:/media".to_string(),
-                ],
-                installed: false,
-            },
-            CatalogApp {
-                id: "homeassistant".to_string(),
-                name: "Home Assistant".to_string(),
-                description: "Open source home automation".to_string(),
-                category: "management".to_string(),
-                image: "ghcr.io/home-assistant/home-assistant:stable".to_string(),
-                ports: vec!["8123:8123".to_string()],
-                volumes: vec!["homeassistant_config:/config".to_string()],
-                installed: false,
-            },
-            CatalogApp {
-                id: "nginx-proxy-manager".to_string(),
-                name: "Nginx Proxy Manager".to_string(),
-                description: "Manage Nginx proxy hosts with a simple UI".to_string(),
-                category: "networking".to_string(),
-                image: "jc21/nginx-proxy-manager:latest".to_string(),
-                ports: vec![
-                    "80:80".to_string(),
-                    "443:443".to_string(),
-                    "81:81".to_string(),
-                ],
-                volumes: vec![
-                    "npm_data:/data".to_string(),
-                    "npm_letsencrypt:/etc/letsencrypt".to_string(),
-                ],
-                installed: false,
-            },
-        ];
-
-        self.apps.set_items(apps);
-    }
-
-    fn filter_by_category(&mut self) {
-        let category = &self.categories[self.selected_category];
-        if category == "All" {
-            self.apps.state.filtered_indices = (0..self.apps.items.len()).collect();
-        } else {
-            self.apps.state.filtered_indices = self
-                .apps
-                .items
-                .iter()
-                .enumerate()
-                .filter_map(|(i, app)| {
-                    if app.category == *category {
-                        Some(i)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+    /// Load the catalog index from the standard locations.
+    ///
+    /// A broken index file is reported instead of being silently ignored: the
+    /// tab shows the error rather than pretending the catalog is empty.
+    fn load_index(&mut self) {
+        match crate::catalog::load_index() {
+            Ok(index) => {
+                self.index_error = None;
+                self.categories = Self::category_filter(&index);
+                if self.selected_category >= self.categories.len() {
+                    self.selected_category = 0;
+                }
+                self.index = Some(index);
+                self.apps.empty_message = "No apps in the catalog.".to_string();
+            }
+            Err(error) => {
+                self.index = None;
+                self.index_error = Some(error.to_string());
+                self.categories = vec![ALL_CATEGORIES.to_string()];
+                self.selected_category = 0;
+                self.apps.empty_message = format!("The catalog index could not be loaded: {error}");
+                self.apps.set_items(Vec::new());
+            }
         }
-        self.apps.state.list_state.select(Some(0));
     }
 
-    fn build_detail(&mut self) {
+    /// The category filter options: `All` plus the categories of the index.
+    fn category_filter(index: &CatalogIndex) -> Vec<String> {
+        let mut categories = vec![ALL_CATEGORIES.to_string()];
+        categories.extend(index.categories());
+        categories
+    }
+
+    /// The category that is currently selected.
+    fn selected_category_name(&self) -> &str {
+        self.categories
+            .get(self.selected_category)
+            .map(String::as_str)
+            .unwrap_or(ALL_CATEGORIES)
+    }
+
+    /// Rebuild the list from the index and the runtime inspection.
+    ///
+    /// The installed state comes from the containers the runtime inspection
+    /// found, so the list always reflects the host rather than what this tab
+    /// did earlier.
+    fn rebuild_items(&mut self, state: &AppState) {
+        let Some(index) = &self.index else {
+            return;
+        };
+
+        let category = self.selected_category_name().to_string();
+        let entries: Vec<CatalogEntry> = index
+            .apps
+            .iter()
+            .filter(|entry| category == ALL_CATEGORIES || entry.category == category)
+            .cloned()
+            .collect();
+
+        let apps = entries
+            .into_iter()
+            .map(|entry| {
+                let (installed, installed_runtime) = installed_state(&entry, state);
+                CatalogApp {
+                    entry,
+                    installed,
+                    installed_runtime,
+                }
+            })
+            .collect();
+
+        self.apps.set_items_preserving_selection(apps);
+    }
+
+    fn build_detail(&mut self, state: &AppState) {
         self.detail.clear();
 
-        if let Some(app) = self.apps.selected() {
-            self.detail.set_title(app.name.clone());
-            self.detail.add_section(crate::tui::widgets::DetailSection {
-                title: "Overview".to_string(),
-                expanded: true,
-                fields: vec![
-                    crate::tui::widgets::DetailField {
-                        key: "Name".to_string(),
-                        value: app.name.clone(),
-                        style: None,
-                    },
-                    crate::tui::widgets::DetailField {
-                        key: "Category".to_string(),
-                        value: app.category.clone(),
-                        style: None,
-                    },
-                    crate::tui::widgets::DetailField {
-                        key: "Image".to_string(),
-                        value: app.image.clone(),
-                        style: None,
-                    },
-                    crate::tui::widgets::DetailField {
-                        key: "Install".to_string(),
-                        value: "preview only - no changes are made to the host".to_string(),
-                        style: Some(Style::default().fg(Color::Yellow)),
-                    },
-                ],
-            });
+        if let Some(error) = &self.index_error {
+            self.detail.set_title("Catalog Unavailable");
+            self.detail.push_field("Error", error.clone());
+            self.detail.push_field(
+                "Index",
+                crate::catalog::default_index_path().display().to_string(),
+            );
+            return;
+        }
 
+        let Some(app) = self.apps.selected().cloned() else {
+            self.detail.set_title("App Details");
+            self.detail.push_field("Select an app", "to view details");
+            return;
+        };
+
+        self.detail.set_title(app.entry.name.clone());
+        self.detail.add_section(crate::tui::widgets::DetailSection {
+            title: "Overview".to_string(),
+            expanded: true,
+            fields: vec![
+                crate::tui::widgets::DetailField {
+                    key: "Id".to_string(),
+                    value: app.entry.id.clone(),
+                    style: None,
+                },
+                crate::tui::widgets::DetailField {
+                    key: "Category".to_string(),
+                    value: app.entry.category.clone(),
+                    style: None,
+                },
+                crate::tui::widgets::DetailField {
+                    key: "Image".to_string(),
+                    value: app.entry.image.clone(),
+                    style: None,
+                },
+                crate::tui::widgets::DetailField {
+                    key: "Runtime".to_string(),
+                    value: app.entry.runtime.clone(),
+                    style: None,
+                },
+                crate::tui::widgets::DetailField {
+                    key: "Restart".to_string(),
+                    value: app.entry.restart_policy.clone(),
+                    style: None,
+                },
+                crate::tui::widgets::DetailField {
+                    key: "Installed".to_string(),
+                    value: match (&app.installed, &app.installed_runtime) {
+                        (true, Some(runtime)) => format!("yes ({runtime})"),
+                        (true, None) => "yes".to_string(),
+                        (false, _) => "no".to_string(),
+                    },
+                    style: Some(if app.installed {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    }),
+                },
+            ],
+        });
+
+        if !app.entry.description.is_empty() {
             self.detail.add_section(crate::tui::widgets::DetailSection {
                 title: "Description".to_string(),
                 expanded: true,
                 fields: vec![crate::tui::widgets::DetailField {
-                    key: "".to_string(),
-                    value: app.description.clone(),
+                    key: String::new(),
+                    value: app.entry.description.clone(),
                     style: None,
                 }],
             });
+        }
 
-            if !app.ports.is_empty() {
-                self.detail.add_section(crate::tui::widgets::DetailSection {
-                    title: "Ports".to_string(),
-                    expanded: true,
-                    fields: app
-                        .ports
-                        .iter()
-                        .map(|p| crate::tui::widgets::DetailField {
-                            key: "Port".to_string(),
-                            value: p.clone(),
-                            style: None,
-                        })
-                        .collect(),
-                });
-            }
+        if !app.entry.ports.is_empty() {
+            self.detail.add_section(crate::tui::widgets::DetailSection {
+                title: "Ports".to_string(),
+                expanded: true,
+                fields: app
+                    .entry
+                    .ports
+                    .iter()
+                    .map(|port| crate::tui::widgets::DetailField {
+                        key: "Port".to_string(),
+                        value: format!("{}:{}/{}", port.host, port.container, port.protocol),
+                        style: None,
+                    })
+                    .collect(),
+            });
+        }
 
-            if !app.volumes.is_empty() {
-                self.detail.add_section(crate::tui::widgets::DetailSection {
-                    title: "Volumes".to_string(),
-                    expanded: true,
-                    fields: app
-                        .volumes
-                        .iter()
-                        .map(|v| crate::tui::widgets::DetailField {
-                            key: "Volume".to_string(),
-                            value: v.clone(),
-                            style: None,
-                        })
-                        .collect(),
-                });
+        if !app.entry.volumes.is_empty() {
+            self.detail.add_section(crate::tui::widgets::DetailSection {
+                title: "Volumes".to_string(),
+                expanded: true,
+                fields: app
+                    .entry
+                    .volumes
+                    .iter()
+                    .map(|volume| crate::tui::widgets::DetailField {
+                        key: volume.kind.clone(),
+                        value: format!("{} -> {}", volume.source, volume.target),
+                        style: None,
+                    })
+                    .collect(),
+            });
+        }
+
+        if !app.entry.env.is_empty() {
+            self.detail.add_section(crate::tui::widgets::DetailSection {
+                title: "Environment".to_string(),
+                expanded: true,
+                fields: app
+                    .entry
+                    .env
+                    .iter()
+                    .map(|(key, value)| crate::tui::widgets::DetailField {
+                        key: key.clone(),
+                        value: value.clone(),
+                        style: None,
+                    })
+                    .collect(),
+            });
+        }
+
+        if let Some(receipt) = &self.last_receipt {
+            self.detail.add_section(crate::tui::widgets::DetailSection {
+                title: "Last Action".to_string(),
+                expanded: true,
+                fields: vec![
+                    crate::tui::widgets::DetailField {
+                        key: "Action".to_string(),
+                        value: receipt.plan.summary.clone(),
+                        style: None,
+                    },
+                    crate::tui::widgets::DetailField {
+                        key: "Command".to_string(),
+                        value: receipt.plan.command_line(),
+                        style: None,
+                    },
+                    crate::tui::widgets::DetailField {
+                        key: "Executed".to_string(),
+                        value: if receipt.execution.executed {
+                            "yes".to_string()
+                        } else {
+                            "no (dry-run)".to_string()
+                        },
+                        style: Some(if receipt.execution.executed {
+                            Style::default().fg(Color::Green)
+                        } else {
+                            Style::default().fg(Color::Yellow)
+                        }),
+                    },
+                ],
+            });
+        }
+
+        let _ = state;
+    }
+
+    fn build_action_menu(&mut self, state: &AppState) {
+        let Some(app) = self.apps.selected().cloned() else {
+            self.action_menu = ActionMenu::new("App Actions", Vec::new());
+            return;
+        };
+
+        let dry_run = state.mutation_mode() != Some(MutationMode::Execute);
+        let action = if app.installed {
+            Action {
+                label: "Uninstall".to_string(),
+                description: if dry_run {
+                    "Plan the removal of the container".to_string()
+                } else {
+                    "Remove the container from the host".to_string()
+                },
+                key: Some('u'),
+                enabled: true,
+                dangerous: true,
             }
         } else {
-            self.detail.set_title("App Details");
-            self.detail.push_field("Select an app", "to view details");
+            Action {
+                label: "Install".to_string(),
+                description: if dry_run {
+                    "Plan the deployment of this application".to_string()
+                } else {
+                    "Deploy this application on the host".to_string()
+                },
+                key: Some('i'),
+                enabled: true,
+                dangerous: false,
+            }
+        };
+
+        self.action_menu = ActionMenu::new(format!("Actions: {}", app.entry.name), vec![action]);
+    }
+
+    /// Build the mutation target for an action on the selected entry.
+    fn target_for(
+        app: &CatalogApp,
+        verb: &MutationVerb,
+    ) -> crate::error::Result<(&'static dyn MutationBackend, MutationTarget)> {
+        let runtime = match verb {
+            MutationVerb::Install => app.entry.runtime.clone(),
+            _ => app
+                .installed_runtime
+                .clone()
+                .unwrap_or_else(|| app.entry.runtime.clone()),
+        };
+
+        let Some(backend) = backend_for(&runtime) else {
+            return Err(crate::error::AnvilError::Config(format!(
+                "catalog entry '{}': unsupported runtime '{}'",
+                app.entry.id, runtime
+            )));
+        };
+
+        let target = match verb {
+            MutationVerb::Install => install_target(&app.entry)?,
+            _ => {
+                let Some(kind) = runtime_kind(&runtime) else {
+                    return Err(crate::error::AnvilError::Config(format!(
+                        "catalog entry '{}': unsupported runtime '{}'",
+                        app.entry.id, runtime
+                    )));
+                };
+                MutationTarget::Container {
+                    runtime: kind,
+                    name: app.entry.id.clone(),
+                }
+            }
+        };
+
+        Ok((backend, target))
+    }
+}
+
+/// Whether a container for the entry exists, and in which runtime.
+///
+/// The entry's own runtime is preferred; a container with the same name in
+/// another runtime is still reported, because the container really exists.
+fn installed_state(entry: &CatalogEntry, state: &AppState) -> (bool, Option<String>) {
+    let Some(runtime) = &state.runtime else {
+        return (false, None);
+    };
+
+    let matches = |name: &str| name.trim_start_matches('/') == entry.id;
+
+    for report in &runtime.container_runtimes {
+        if report.name == entry.runtime
+            && report
+                .containers
+                .iter()
+                .any(|container| matches(&container.name))
+        {
+            return (true, Some(report.name.clone()));
         }
     }
 
-    fn build_action_menu(&mut self) {
-        if let Some(app) = self.apps.selected() {
-            let mut actions = Vec::new();
-
-            // Only actions that actually do something are offered. The
-            // catalog backend is not wired up yet, so every entry here is a
-            // preview that leaves the host untouched.
-            if app.installed {
-                actions.push(Action {
-                    label: "Uninstall".to_string(),
-                    description: "Preview removal of the application containers".to_string(),
-                    key: Some('u'),
-                    enabled: true,
-                    dangerous: true,
-                });
-            } else {
-                actions.push(Action {
-                    label: "Install".to_string(),
-                    description: "Preview the deployment of this application".to_string(),
-                    key: Some('i'),
-                    enabled: true,
-                    dangerous: false,
-                });
-            }
-
-            if !actions.is_empty() {
-                self.action_menu = ActionMenu::new(format!("Actions: {}", app.name), actions);
-            }
+    for report in &runtime.container_runtimes {
+        if report
+            .containers
+            .iter()
+            .any(|container| matches(&container.name))
+        {
+            return (true, Some(report.name.clone()));
         }
     }
 
-    fn start_install(&mut self, app: &CatalogApp) {
-        // Preview only: the catalog backend that executes real installs is not
-        // wired up yet, so this must not claim to have installed anything.
-        self.progress
-            .start(format!("Previewing install of {}...", app.name));
-        self.progress.set_cancellable(true);
-        self.progress.add_detail(format!("Image: {}", app.image));
-        self.progress
-            .add_detail(format!("Ports: {}", app.ports.join(", ")));
-        self.progress
-            .add_detail(format!("Volumes: {}", app.volumes.join(", ")));
-        self.progress.set_progress(50);
-        self.progress
-            .add_detail("No changes were made to the host.".to_string());
-        self.progress.set_progress(100);
-        self.progress
-            .success(format!("Install preview ready for {}", app.name));
-    }
+    (false, None)
 }
 
 impl Tab for CatalogTab {
@@ -403,16 +500,14 @@ impl Tab for CatalogTab {
         "Catalog"
     }
 
-    fn handle_key(&mut self, key: KeyEvent, _state: &mut AppState) -> bool {
+    fn handle_key(&mut self, key: KeyEvent, state: &mut AppState) -> bool {
         // Overlays are handled by the tab manager before the tab sees a key.
-        // Handle list keys
         if self.apps.handle_key(key) {
-            self.build_detail();
-            self.build_action_menu();
+            self.build_detail(state);
+            self.build_action_menu(state);
             return true;
         }
 
-        // Handle detail keys
         if self.detail.handle_key(key) {
             return true;
         }
@@ -426,13 +521,19 @@ impl Tab for CatalogTab {
             }
             crossterm::event::KeyCode::Char('c') => {
                 // Cycle category
-                self.selected_category = (self.selected_category + 1) % self.categories.len();
-                self.filter_by_category();
+                if !self.categories.is_empty() {
+                    self.selected_category = (self.selected_category + 1) % self.categories.len();
+                }
+                self.rebuild_items(state);
+                self.build_detail(state);
+                self.build_action_menu(state);
                 true
             }
             crossterm::event::KeyCode::Char('r') => {
-                self.load_catalog();
-                self.filter_by_category();
+                self.load_index();
+                self.rebuild_items(state);
+                self.build_detail(state);
+                self.build_action_menu(state);
                 true
             }
             crossterm::event::KeyCode::Char('?') => {
@@ -443,12 +544,8 @@ impl Tab for CatalogTab {
         }
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, _state: &AppState) {
-        if self.apps.items.is_empty() {
-            self.load_catalog();
-            self.filter_by_category();
-        }
-        self.build_detail();
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState) {
+        self.build_detail(state);
 
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -471,7 +568,7 @@ impl Tab for CatalogTab {
             .enumerate()
             .map(|(i, c)| {
                 if i == self.selected_category {
-                    format!("[{}]", c)
+                    format!("[{c}]")
                 } else {
                     c.clone()
                 }
@@ -497,19 +594,18 @@ impl Tab for CatalogTab {
                 Enter - Select app\n\
                 a - Show actions for selected app\n\
                 c - Cycle category filter\n\
-                r - Refresh catalog\n\
+                r - Reload the catalog index\n\
                 / - Search apps\n\
                 Ctrl+s - Sort\n\
                 Detail: j/k scroll, Ctrl+d/u page\n\
                 ? - Toggle help\n\
-                Installs are previews until the catalog backend is wired up.",
+                Installs need root and ANVIL_ALLOW_MUTATION=1.",
             )
             .block(Block::default().borders(Borders::ALL).title("Help"))
             .wrap(Wrap { trim: true });
             frame.render_widget(help, left_chunks[2]);
         }
 
-        // Render progress overlay on top
         if self.progress.is_visible() {
             self.progress.render(frame, area);
         }
@@ -527,74 +623,569 @@ impl Tab for CatalogTab {
         Some(&mut self.progress)
     }
 
-    fn update(&mut self, _state: &AppState) {
-        // Keep catalog up to date
-    }
-
-    fn handle_menu_result(
-        &mut self,
-        result: crate::tui::widgets::DialogResult,
-        _state: &mut AppState,
-    ) {
-        if let crate::tui::widgets::DialogResult::Selected(idx) = result
-            && let Some(app) = self.apps.selected()
-            && idx < self.action_menu.actions.len()
-        {
-            let action = &self.action_menu.actions[idx];
-            match action.label.as_str() {
-                "Install" => {
-                    self.confirm_dialog = ConfirmDialog::new(
-                        "Preview Install",
-                        format!(
-                            "Preview the deployment of {} ({}).\nNo changes will be made to the host.",
-                            app.name, app.image
-                        ),
-                    )
-                    .with_labels("Preview", "Cancel");
-                    self.confirm_dialog.show();
-                }
-                "Uninstall" => {
-                    self.confirm_dialog = ConfirmDialog::new(
-                        "Preview Uninstall",
-                        format!(
-                            "Preview the removal of {}.\nNo changes will be made to the host.",
-                            app.name
-                        ),
-                    )
-                    .dangerous(true)
-                    .with_labels("Preview", "Cancel");
-                    self.confirm_dialog.show();
-                }
-                _ => {}
-            }
+    fn update(&mut self, state: &AppState) {
+        if self.index.is_none() && self.index_error.is_none() {
+            self.load_index();
         }
+        self.rebuild_items(state);
+        self.build_detail(state);
+        self.build_action_menu(state);
     }
 
-    fn handle_dialog_result(
-        &mut self,
-        result: crate::tui::widgets::DialogResult,
-        _state: &mut AppState,
-    ) {
-        if let crate::tui::widgets::DialogResult::Confirmed = result {
-            // Clone the selected app so the list can be mutated afterwards.
-            let Some(app) = self.apps.selected().cloned() else {
+    fn handle_menu_result(&mut self, result: DialogResult, state: &mut AppState) {
+        let DialogResult::Selected(index) = result else {
+            return;
+        };
+
+        let Some(action) = self.action_menu.actions.get(index) else {
+            return;
+        };
+
+        let verb = match action.label.as_str() {
+            "Install" => MutationVerb::Install,
+            "Uninstall" => MutationVerb::Remove,
+            _ => return,
+        };
+
+        let Some(app) = self.apps.selected().cloned() else {
+            return;
+        };
+
+        let (backend, target) = match Self::target_for(&app, &verb) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.progress.start(format!("{} failed", action.label));
+                self.progress.error(error.to_string());
                 return;
-            };
+            }
+        };
 
-            // Preview only: nothing is installed or removed yet, so the
-            // installed flag must keep reflecting the host's real state.
-            if app.installed {
-                self.progress
-                    .start(format!("Previewing uninstall of {}...", app.name));
-                self.progress.set_cancellable(true);
-                self.progress
-                    .add_detail("No changes were made to the host.".to_string());
+        // Plan through the controller so the privilege gate applies before
+        // anything is shown as runnable.
+        let plan = match state.plan_runtime_mutation(backend, &target, &verb) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.progress.start(format!("{} failed", action.label));
+                self.progress.error(error.to_string());
+                return;
+            }
+        };
+
+        let command = plan.command_line();
+        let dry_run = state.mutation_mode() != Some(MutationMode::Execute);
+        let message = if dry_run {
+            format!(
+                "Run: {command}\n\nThis session only plans; nothing on the host changes.\nContinue?"
+            )
+        } else {
+            format!("Run: {command}\n\nThis changes the host. Continue?")
+        };
+
+        self.pending = Some(PendingMutation {
+            verb,
+            label: action.label.clone(),
+            command: command.clone(),
+            backend,
+            target,
+        });
+
+        self.confirm_dialog = ConfirmDialog::new(format!("Confirm {}", action.label), message)
+            .with_labels("Run", "Cancel")
+            .dangerous(action.dangerous);
+        self.confirm_dialog.show();
+    }
+
+    fn handle_dialog_result(&mut self, result: DialogResult, state: &mut AppState) {
+        if !matches!(result, DialogResult::Confirmed) {
+            self.pending = None;
+            return;
+        }
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+
+        self.progress.start(format!("{}...", pending.label));
+        self.progress.set_cancellable(false);
+        self.progress
+            .add_detail(format!("Command: {}", pending.command));
+
+        match state.execute_runtime_mutation(pending.backend, &pending.target, &pending.verb) {
+            Ok(receipt) => {
+                let executed = receipt.execution.executed;
                 self.progress.set_progress(100);
+                if executed {
+                    self.progress
+                        .success(format!("{} completed", pending.label));
+                } else {
+                    self.progress.success(format!(
+                        "{} planned (dry-run): {}",
+                        pending.label, pending.command
+                    ));
+                }
+                if let Some(verification) = &receipt.verification {
+                    self.progress.add_detail(format!(
+                        "Verification: {} ({})",
+                        if verification.success { "ok" } else { "failed" },
+                        verification.command
+                    ));
+                }
+                if let Some(rollback) = &receipt.rollback {
+                    self.progress
+                        .add_detail(format!("Rollback: {}", rollback.command_line()));
+                }
+                self.last_receipt = Some(receipt);
+            }
+            Err(error) => {
                 self.progress
-                    .success(format!("Uninstall preview ready for {}", app.name));
-            } else {
-                self.start_install(&app);
+                    .error(format!("{} failed: {error}", pending.label));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::access::{AccessContext, AccessTier};
+    use crate::config::Config;
+    use crate::runtime::controller::MutationController;
+    use crate::runtime::model::{ContainerRuntimeReport, ContainerSummary, RuntimeInspection};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    /// Records every command line the mutation stack executes.
+    struct RecordingRunner {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl crate::platform::CommandRunner for RecordingRunner {
+        fn run(
+            &self,
+            program: &std::path::Path,
+            args: &[&str],
+        ) -> Result<crate::platform::CommandOutput, std::io::Error> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", program.display(), args.join(" ")));
+            Ok(crate::platform::CommandOutput {
+                status: Some(0),
+                stdout: "true".to_string(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
+    }
+
+    fn entry(id: &str, category: &str) -> CatalogEntry {
+        CatalogEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: format!("the {id} app"),
+            category: category.to_string(),
+            image: format!("{id}:latest"),
+            runtime: "docker".to_string(),
+            restart_policy: "unless-stopped".to_string(),
+            ports: Vec::new(),
+            volumes: Vec::new(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    fn test_index() -> CatalogIndex {
+        CatalogIndex::new(vec![
+            entry("nginx", "networking"),
+            entry("redis", "database"),
+        ])
+    }
+
+    /// A tab that already holds a known index.
+    fn tab_with_index() -> CatalogTab {
+        let mut tab = CatalogTab::new();
+        tab.index = Some(test_index());
+        tab.categories = CatalogTab::category_filter(&test_index());
+        tab
+    }
+
+    /// A state with a root controller and one running docker container.
+    fn state_with_container(runner: Arc<RecordingRunner>, container: &str) -> AppState {
+        let access = AccessContext {
+            tier: AccessTier::Root,
+        };
+        let mut state = AppState::bootstrap(Config::default(), access, Vec::new());
+        state.mutation_controller = Some(MutationController::new(
+            access,
+            MutationMode::Execute,
+            runner as Arc<dyn crate::platform::CommandRunner + Send + Sync>,
+        ));
+        state.runtime = Some(RuntimeInspection {
+            container_runtimes: vec![ContainerRuntimeReport {
+                name: "docker".to_string(),
+                socket: "/var/run/docker.sock".to_string(),
+                binary: Some("/usr/bin/docker".to_string()),
+                daemon_reachable: true,
+                daemon_status: Some("running".to_string()),
+                containers: vec![ContainerSummary {
+                    id: "abc123def456".to_string(),
+                    name: container.to_string(),
+                    image: "nginx:latest".to_string(),
+                    status: "Up 2 minutes".to_string(),
+                }],
+            }],
+            ..RuntimeInspection::default()
+        });
+        state
+    }
+
+    fn state_without_containers(runner: Arc<RecordingRunner>) -> AppState {
+        let access = AccessContext {
+            tier: AccessTier::Root,
+        };
+        let mut state = AppState::bootstrap(Config::default(), access, Vec::new());
+        state.mutation_controller = Some(MutationController::new(
+            access,
+            MutationMode::Execute,
+            runner as Arc<dyn crate::platform::CommandRunner + Send + Sync>,
+        ));
+        state.runtime = Some(RuntimeInspection::default());
+        state
+    }
+
+    #[test]
+    fn the_tab_lists_the_index_entries() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let state = state_without_containers(runner);
+        let mut tab = tab_with_index();
+
+        tab.update(&state);
+
+        assert_eq!(tab.apps.total_count(), 2);
+        assert_eq!(tab.apps.items[0].id(), "nginx".to_string());
+    }
+
+    #[test]
+    fn the_category_filter_narrows_the_list() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let state = state_without_containers(runner);
+        let mut tab = tab_with_index();
+
+        tab.update(&state);
+        assert_eq!(tab.apps.total_count(), 2);
+
+        tab.selected_category = tab
+            .categories
+            .iter()
+            .position(|category| category == "database")
+            .expect("the database category exists");
+        tab.rebuild_items(&state);
+
+        assert_eq!(tab.apps.total_count(), 1);
+        assert_eq!(tab.apps.items[0].id(), "redis".to_string());
+    }
+
+    #[test]
+    fn the_installed_state_comes_from_the_runtime_inspection() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let state = state_with_container(runner, "nginx");
+        let mut tab = tab_with_index();
+
+        tab.update(&state);
+
+        let nginx = tab
+            .apps
+            .items
+            .iter()
+            .find(|app| app.id() == "nginx")
+            .expect("nginx is in the catalog");
+        assert!(nginx.installed);
+        assert_eq!(nginx.installed_runtime.as_deref(), Some("docker"));
+
+        let redis = tab
+            .apps
+            .items
+            .iter()
+            .find(|app| app.id() == "redis")
+            .expect("redis is in the catalog");
+        assert!(!redis.installed);
+        assert!(redis.installed_runtime.is_none());
+    }
+
+    #[test]
+    fn an_installed_app_offers_an_uninstall_action() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let state = state_with_container(runner, "nginx");
+        let mut tab = tab_with_index();
+
+        tab.update(&state);
+
+        assert_eq!(tab.action_menu.actions.len(), 1);
+        assert_eq!(tab.action_menu.actions[0].label, "Uninstall");
+        assert!(tab.action_menu.actions[0].dangerous);
+    }
+
+    #[test]
+    fn an_app_that_is_not_installed_offers_an_install_action() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let state = state_without_containers(runner);
+        let mut tab = tab_with_index();
+
+        tab.update(&state);
+
+        assert_eq!(tab.action_menu.actions.len(), 1);
+        assert_eq!(tab.action_menu.actions[0].label, "Install");
+        assert!(!tab.action_menu.actions[0].dangerous);
+    }
+
+    #[test]
+    fn an_install_routes_through_the_mutation_controller() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let mut state = state_without_containers(runner);
+        let mut tab = tab_with_index();
+
+        tab.update(&state);
+        tab.handle_menu_result(DialogResult::Selected(0), &mut state);
+
+        assert!(tab.confirm_dialog.is_visible());
+        assert!(tab.pending.is_some());
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "nothing runs before the confirmation"
+        );
+
+        tab.handle_dialog_result(DialogResult::Confirmed, &mut state);
+
+        let receipt = tab.last_receipt.expect("a receipt should be recorded");
+        assert!(receipt.execution.executed);
+        assert_eq!(
+            receipt.plan.command_line(),
+            "docker run -d --name nginx --restart unless-stopped nginx:latest"
+        );
+        assert_eq!(state.mutation_audit().len(), 1);
+
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(
+            recorded[0],
+            "docker run -d --name nginx --restart unless-stopped nginx:latest"
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|call| call.starts_with("docker inspect")),
+            "the mutation should be verified: {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn an_uninstall_removes_the_container() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let mut state = state_with_container(runner, "nginx");
+        let mut tab = tab_with_index();
+
+        tab.update(&state);
+        tab.handle_menu_result(DialogResult::Selected(0), &mut state);
+        tab.handle_dialog_result(DialogResult::Confirmed, &mut state);
+
+        let receipt = tab.last_receipt.expect("a receipt should be recorded");
+        assert!(receipt.execution.executed);
+        assert_eq!(receipt.plan.command_line(), "docker rm -f nginx");
+        assert_eq!(state.mutation_audit().len(), 1);
+
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded[0], "docker rm -f nginx");
+    }
+
+    #[test]
+    fn cancelling_the_confirmation_runs_nothing() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let mut state = state_without_containers(runner);
+        let mut tab = tab_with_index();
+
+        tab.update(&state);
+        tab.handle_menu_result(DialogResult::Selected(0), &mut state);
+        tab.handle_dialog_result(DialogResult::Cancelled, &mut state);
+
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(tab.last_receipt.is_none());
+        assert!(state.mutation_audit().is_empty());
+        assert!(tab.pending.is_none());
+    }
+
+    #[test]
+    fn a_dry_run_session_produces_a_dry_run_receipt() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let access = AccessContext {
+            tier: AccessTier::Root,
+        };
+        let mut state = AppState::bootstrap(Config::default(), access, Vec::new());
+        state.mutation_controller = Some(MutationController::new(
+            access,
+            MutationMode::DryRun,
+            runner as Arc<dyn crate::platform::CommandRunner + Send + Sync>,
+        ));
+        let mut tab = tab_with_index();
+
+        tab.update(&state);
+        tab.handle_menu_result(DialogResult::Selected(0), &mut state);
+        tab.handle_dialog_result(DialogResult::Confirmed, &mut state);
+
+        let receipt = tab.last_receipt.expect("a receipt should be recorded");
+        assert!(!receipt.execution.executed);
+        assert!(calls.lock().unwrap().is_empty());
+        assert_eq!(state.mutation_audit().len(), 1);
+    }
+
+    #[test]
+    fn a_read_only_session_cannot_plan_an_install() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let access = AccessContext {
+            tier: AccessTier::ReadOnly,
+        };
+        let mut state = AppState::bootstrap(Config::default(), access, Vec::new());
+        state.mutation_controller = Some(MutationController::new(
+            access,
+            MutationMode::Execute,
+            runner as Arc<dyn crate::platform::CommandRunner + Send + Sync>,
+        ));
+        let mut tab = tab_with_index();
+
+        tab.update(&state);
+        tab.handle_menu_result(DialogResult::Selected(0), &mut state);
+
+        assert!(!tab.confirm_dialog.is_visible());
+        assert!(tab.pending.is_none());
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(tab.progress.is_done());
+        assert_eq!(
+            tab.progress.state,
+            crate::tui::widgets::progress::ProgressState::Error
+        );
+    }
+
+    #[test]
+    fn the_action_key_opens_the_action_menu() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let mut state = state_without_containers(runner);
+        let mut tab = tab_with_index();
+
+        tab.update(&state);
+        assert!(tab.handle_key(key(KeyCode::Char('a')), &mut state));
+
+        assert!(tab.action_menu.is_visible());
+    }
+
+    #[test]
+    fn the_category_key_cycles_the_filter() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let mut state = state_without_containers(runner);
+        let mut tab = tab_with_index();
+
+        tab.update(&state);
+        assert_eq!(tab.selected_category, 0);
+
+        assert!(tab.handle_key(key(KeyCode::Char('c')), &mut state));
+
+        assert_eq!(tab.selected_category, 1);
+        assert_eq!(tab.apps.total_count(), 1);
+    }
+
+    #[test]
+    fn the_tab_renders_the_catalog_entries() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let state = state_with_container(runner, "nginx");
+        let mut tab = tab_with_index();
+        tab.update(&state);
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(90, 24)).expect("the test terminal starts");
+        terminal
+            .draw(|frame| tab.render(frame, frame.area(), &state))
+            .expect("the tab renders");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("nginx"), "{text}");
+        assert!(text.contains("redis"), "{text}");
+        assert!(text.contains("App Catalog"), "{text}");
+    }
+
+    #[test]
+    fn a_broken_index_is_reported_instead_of_hidden() {
+        let mut tab = CatalogTab::new();
+        tab.index = None;
+        tab.index_error = Some("catalog file is broken".to_string());
+        tab.apps.empty_message = "The catalog index could not be loaded".to_string();
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let state = state_without_containers(runner);
+
+        tab.build_detail(&state);
+
+        assert!(tab.apps.items.is_empty());
+        assert!(
+            tab.detail
+                .sections
+                .iter()
+                .flat_map(|section| section.fields.iter())
+                .any(|field| field.value.contains("catalog file is broken")),
+            "the error should be visible in the detail pane"
+        );
     }
 }

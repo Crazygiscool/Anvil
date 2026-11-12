@@ -92,6 +92,17 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    /// The mutation mode of this session.
+    ///
+    /// `Some(Execute)` means a confirmed mutation really touches the host;
+    /// `Some(DryRun)` means the session only plans. `None` means no
+    /// controller has been set up yet.
+    pub fn mutation_mode(&self) -> Option<crate::runtime::mutation::MutationMode> {
+        self.mutation_controller
+            .as_ref()
+            .map(|controller| controller.mode())
+    }
+
     #[allow(dead_code)]
     pub fn mutation_audit(&self) -> &[ControllerReceipt] {
         &self.mutation_ledger

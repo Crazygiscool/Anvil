@@ -358,6 +358,14 @@ impl MutationGateway {
         self.access.allows_mutation()
     }
 
+    /// The mode the gateway runs in.
+    ///
+    /// The UI needs this to tell the user whether a confirmed action will
+    /// really touch the host or only be planned.
+    pub fn mode(&self) -> MutationMode {
+        self.mode
+    }
+
     pub fn plan(
         &self,
         backend: &dyn MutationBackend,

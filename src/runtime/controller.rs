@@ -42,6 +42,11 @@ impl MutationController {
         self.gateway.can_mutate()
     }
 
+    /// The mode the controller runs in.
+    pub fn mode(&self) -> MutationMode {
+        self.gateway.mode()
+    }
+
     pub fn plan(
         &self,
         backend: &dyn MutationBackend,

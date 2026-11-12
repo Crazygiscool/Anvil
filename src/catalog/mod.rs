@@ -18,6 +18,8 @@ pub use index::{
     standard_index_paths, validate_entry, validate_index,
 };
 #[allow(unused_imports)]
-pub use install::{backend_for, container_spec, install_plan, install_target, uninstall_plan};
+pub use install::{
+    backend_for, container_spec, install_plan, install_target, runtime_kind, uninstall_plan,
+};
 #[allow(unused_imports)]
 pub use model::{CatalogEntry, CatalogIndex, CatalogPort, CatalogVolume, SUPPORTED_INDEX_VERSION};
