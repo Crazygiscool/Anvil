@@ -57,4 +57,40 @@ pub enum Commands {
         #[arg(short, long, action = clap::ArgAction::Count)]
         verbose: u8,
     },
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCommands,
+    },
+}
+
+/// Subcommands for the application catalog.
+#[derive(Debug, Subcommand)]
+pub enum CatalogCommands {
+    /// List the catalog entries.
+    List {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, value_name = "CATEGORY")]
+        category: Option<String>,
+    },
+    /// Show a single catalog entry.
+    Show {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install a catalog entry.
+    Install {
+        id: String,
+        #[arg(long)]
+        json: bool,
+        /// Only plan the installation; never touches the host.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Replace the local catalog index with a validated file.
+    Update {
+        #[arg(long, value_name = "FILE")]
+        from_file: PathBuf,
+    },
 }

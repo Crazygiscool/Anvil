@@ -3,35 +3,81 @@
 #![allow(clippy::clone_on_copy)]
 
 use crate::error::AnvilError;
+use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeKind {
     Docker,
     Podman,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InitKind {
     Systemd,
     Openrc,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MutationVerb {
     Start,
     Stop,
     Restart,
     Enable,
     Disable,
+    Install,
+    Remove,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A port mapping for a container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PortMapping {
+    pub host: u16,
+    pub container: u16,
+    pub protocol: String,
+}
+
+/// A volume mount for a container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VolumeMount {
+    pub source: String,
+    pub target: String,
+    /// `volume` for a named volume, `bind` for a host path.
+    pub kind: String,
+}
+
+/// Everything needed to create a container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContainerSpec {
+    pub name: String,
+    pub image: String,
+    pub ports: Vec<PortMapping>,
+    pub volumes: Vec<VolumeMount>,
+    pub env: Vec<(String, String)>,
+    pub restart_policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MutationTarget {
-    Container { runtime: RuntimeKind, name: String },
-    Service { init: InitKind, name: String },
+    Container {
+        runtime: RuntimeKind,
+        name: String,
+    },
+    Service {
+        init: InitKind,
+        name: String,
+    },
+    /// A container that does not exist yet and has to be created.
+    ContainerInstall {
+        runtime: RuntimeKind,
+        spec: ContainerSpec,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MutationPlan {
     pub target: MutationTarget,
     pub verb: MutationVerb,
@@ -84,6 +130,11 @@ impl MutationBackend for SystemdBackend {
             MutationVerb::Restart => ("restart", vec![name.clone()]),
             MutationVerb::Enable => ("enable", vec![name.clone()]),
             MutationVerb::Disable => ("disable", vec![name.clone()]),
+            MutationVerb::Install | MutationVerb::Remove => {
+                return Err(AnvilError::Config(
+                    "systemd services do not support install or remove".to_string(),
+                ));
+            }
         };
         Ok(MutationPlan {
             target: target.clone(),
@@ -122,6 +173,11 @@ impl MutationBackend for OpenrcBackend {
             MutationVerb::Restart => "restart",
             MutationVerb::Enable => "enable",
             MutationVerb::Disable => "disable",
+            MutationVerb::Install | MutationVerb::Remove => {
+                return Err(AnvilError::Config(
+                    "OpenRC services do not support install or remove".to_string(),
+                ));
+            }
         };
         Ok(MutationPlan {
             target: target.clone(),
@@ -143,16 +199,7 @@ impl MutationBackend for DockerBackend {
         target: &MutationTarget,
         verb: &MutationVerb,
     ) -> Result<MutationPlan, AnvilError> {
-        let MutationTarget::Container {
-            runtime: RuntimeKind::Docker,
-            name,
-        } = target
-        else {
-            return Err(AnvilError::Config(
-                "Docker backend received a non-Docker target".to_string(),
-            ));
-        };
-        mutation_from_container_verb(name, verb, "docker")
+        plan_container_mutation(target, verb, "docker", RuntimeKind::Docker)
     }
 }
 
@@ -164,53 +211,125 @@ impl MutationBackend for PodmanBackend {
         target: &MutationTarget,
         verb: &MutationVerb,
     ) -> Result<MutationPlan, AnvilError> {
-        let MutationTarget::Container {
-            runtime: RuntimeKind::Podman,
-            name,
-        } = target
-        else {
-            return Err(AnvilError::Config(
-                "Podman backend received a non-Podman target".to_string(),
-            ));
-        };
-        mutation_from_container_verb(name, verb, "podman")
+        plan_container_mutation(target, verb, "podman", RuntimeKind::Podman)
     }
 }
 
-fn mutation_from_container_verb(
-    name: &str,
+/// Build the command for a container lifecycle mutation.
+///
+/// Container installs and removals go through the same plan/execute path as
+/// every other mutation, so the privilege gate, the receipt, the
+/// verification step and the rollback plan all apply unchanged.
+fn plan_container_mutation(
+    target: &MutationTarget,
     verb: &MutationVerb,
     program: &'static str,
+    expected: RuntimeKind,
 ) -> Result<MutationPlan, AnvilError> {
-    let command_verb = match verb {
-        MutationVerb::Start => "start",
-        MutationVerb::Stop => "stop",
-        MutationVerb::Restart => "restart",
-        MutationVerb::Enable | MutationVerb::Disable => {
-            return Err(AnvilError::Config(format!(
-                "{program} container lifecycle does not support service enablement"
-            )));
+    match target {
+        MutationTarget::Container { runtime, name } => {
+            if *runtime != expected {
+                return Err(AnvilError::Config(format!(
+                    "{program} backend received a target for a different runtime"
+                )));
+            }
+            let command_verb = match verb {
+                MutationVerb::Start => "start",
+                MutationVerb::Stop => "stop",
+                MutationVerb::Restart => "restart",
+                MutationVerb::Remove => "rm",
+                MutationVerb::Enable | MutationVerb::Disable => {
+                    return Err(AnvilError::Config(format!(
+                        "{program} container lifecycle does not support service enablement"
+                    )));
+                }
+                MutationVerb::Install => {
+                    return Err(AnvilError::Config(format!(
+                        "{program} install requires a container specification"
+                    )));
+                }
+            };
+            let mut args = vec![command_verb.to_string()];
+            if command_verb == "rm" {
+                args.push("-f".to_string());
+            }
+            args.push(name.clone());
+            Ok(MutationPlan {
+                target: target.clone(),
+                verb: *verb,
+                program,
+                args,
+                requires_root: true,
+                dry_run_only: true,
+                summary: format!("plan container {} for {}", command_verb, name),
+            })
         }
-    };
-    Ok(MutationPlan {
-        target: MutationTarget::Container {
-            runtime: if program == "docker" {
-                RuntimeKind::Docker
-            } else {
-                RuntimeKind::Podman
-            },
-            name: name.to_string(),
-        },
-        verb: *verb,
-        program,
-        args: vec![command_verb.to_string(), name.to_string()],
-        requires_root: true,
-        dry_run_only: true,
-        summary: format!("plan container {} for {}", command_verb, name),
-    })
+        MutationTarget::ContainerInstall { runtime, spec } => {
+            if *runtime != expected {
+                return Err(AnvilError::Config(format!(
+                    "{program} backend received a target for a different runtime"
+                )));
+            }
+            if !matches!(verb, MutationVerb::Install) {
+                return Err(AnvilError::Config(format!(
+                    "{program} container specification only supports install"
+                )));
+            }
+            Ok(MutationPlan {
+                target: target.clone(),
+                verb: *verb,
+                program,
+                args: container_run_args(spec),
+                requires_root: true,
+                dry_run_only: true,
+                summary: format!(
+                    "plan install of container {} from {}",
+                    spec.name, spec.image
+                ),
+            })
+        }
+        MutationTarget::Service { .. } => Err(AnvilError::Config(format!(
+            "{program} backend received a non-container target"
+        ))),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Arguments for `docker run` / `podman run` that create and start a
+/// container in one step.
+fn container_run_args(spec: &ContainerSpec) -> Vec<String> {
+    let mut args = vec!["run".to_string(), "-d".to_string()];
+    args.push("--name".to_string());
+    args.push(spec.name.clone());
+
+    let policy = spec.restart_policy.trim();
+    if !policy.is_empty() && policy != "no" {
+        args.push("--restart".to_string());
+        args.push(policy.to_string());
+    }
+
+    for port in &spec.ports {
+        args.push("-p".to_string());
+        args.push(format!(
+            "{}:{}/{}",
+            port.host, port.container, port.protocol
+        ));
+    }
+
+    for volume in &spec.volumes {
+        args.push("-v".to_string());
+        args.push(format!("{}:{}", volume.source, volume.target));
+    }
+
+    for (key, value) in &spec.env {
+        args.push("-e".to_string());
+        args.push(format!("{key}={value}"));
+    }
+
+    args.push(spec.image.clone());
+    args
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MutationExecutionReceipt {
     pub executed: bool,
     pub exit_code: Option<i32>,
@@ -275,13 +394,15 @@ fn verb_name(verb: MutationVerb) -> &'static str {
         MutationVerb::Restart => "restart service",
         MutationVerb::Enable => "enable service",
         MutationVerb::Disable => "disable service",
+        MutationVerb::Install => "install container",
+        MutationVerb::Remove => "remove container",
     }
 }
 
 #[allow(dead_code)]
 pub fn mutation_kind(target: &MutationTarget) -> &'static str {
     match target {
-        MutationTarget::Container { .. } => "container",
+        MutationTarget::Container { .. } | MutationTarget::ContainerInstall { .. } => "container",
         MutationTarget::Service { .. } => "service",
     }
 }
@@ -342,6 +463,148 @@ mod tests {
                 .is_err()
         );
     }
+
+    fn install_spec() -> ContainerSpec {
+        ContainerSpec {
+            name: "web".to_string(),
+            image: "nginx:latest".to_string(),
+            ports: vec![PortMapping {
+                host: 8080,
+                container: 80,
+                protocol: "tcp".to_string(),
+            }],
+            volumes: vec![VolumeMount {
+                source: "web_data".to_string(),
+                target: "/data".to_string(),
+                kind: "volume".to_string(),
+            }],
+            env: vec![("TZ".to_string(), "UTC".to_string())],
+            restart_policy: "unless-stopped".to_string(),
+        }
+    }
+
+    #[test]
+    fn container_install_plans_a_run_command() {
+        let backend = DockerBackend;
+        let target = MutationTarget::ContainerInstall {
+            runtime: RuntimeKind::Docker,
+            spec: install_spec(),
+        };
+
+        let plan = backend.plan(&target, &MutationVerb::Install).unwrap();
+
+        assert_eq!(plan.program, "docker");
+        assert_eq!(
+            plan.args,
+            vec![
+                "run".to_string(),
+                "-d".to_string(),
+                "--name".to_string(),
+                "web".to_string(),
+                "--restart".to_string(),
+                "unless-stopped".to_string(),
+                "-p".to_string(),
+                "8080:80/tcp".to_string(),
+                "-v".to_string(),
+                "web_data:/data".to_string(),
+                "-e".to_string(),
+                "TZ=UTC".to_string(),
+                "nginx:latest".to_string(),
+            ]
+        );
+        assert!(plan.requires_root);
+    }
+
+    #[test]
+    fn container_install_rolls_back_by_removing_the_container() {
+        let backend = DockerBackend;
+        let target = MutationTarget::ContainerInstall {
+            runtime: RuntimeKind::Docker,
+            spec: install_spec(),
+        };
+
+        let rollback = build_rollback_plan(&backend, &target, &MutationVerb::Install).unwrap();
+
+        assert_eq!(rollback.program, "docker");
+        assert_eq!(
+            rollback.args,
+            vec!["rm".to_string(), "-f".to_string(), "web".to_string()]
+        );
+    }
+
+    #[test]
+    fn container_remove_uses_the_force_flag() {
+        let backend = PodmanBackend;
+        let target = MutationTarget::Container {
+            runtime: RuntimeKind::Podman,
+            name: "web".to_string(),
+        };
+
+        let plan = backend.plan(&target, &MutationVerb::Remove).unwrap();
+
+        assert_eq!(plan.program, "podman");
+        assert_eq!(
+            plan.args,
+            vec!["rm".to_string(), "-f".to_string(), "web".to_string()]
+        );
+    }
+
+    #[test]
+    fn container_install_target_is_verified_with_inspect() {
+        let target = MutationTarget::ContainerInstall {
+            runtime: RuntimeKind::Docker,
+            spec: install_spec(),
+        };
+
+        let command = verification_command(&target).unwrap();
+
+        assert_eq!(command.program, "docker");
+        assert_eq!(
+            command.args,
+            vec![
+                "inspect".to_string(),
+                "--format={{.State.Running}}".to_string(),
+                "web".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn container_backends_reject_targets_from_another_runtime() {
+        let backend = DockerBackend;
+        let result = backend.plan(
+            &MutationTarget::Container {
+                runtime: RuntimeKind::Podman,
+                name: "app".to_string(),
+            },
+            &MutationVerb::Start,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn install_requires_a_container_specification() {
+        let backend = DockerBackend;
+        let result = backend.plan(
+            &MutationTarget::Container {
+                runtime: RuntimeKind::Docker,
+                name: "app".to_string(),
+            },
+            &MutationVerb::Install,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn service_backends_reject_install_and_remove() {
+        let backend = SystemdBackend;
+        let target = MutationTarget::Service {
+            init: InitKind::Systemd,
+            name: "demo.service".to_string(),
+        };
+        assert!(backend.plan(&target, &MutationVerb::Install).is_err());
+        assert!(backend.plan(&target, &MutationVerb::Remove).is_err());
+    }
 }
 
 pub fn rollback_verb(verb: MutationVerb) -> Option<MutationVerb> {
@@ -351,6 +614,8 @@ pub fn rollback_verb(verb: MutationVerb) -> Option<MutationVerb> {
         MutationVerb::Restart => None,
         MutationVerb::Enable => Some(MutationVerb::Disable),
         MutationVerb::Disable => Some(MutationVerb::Enable),
+        MutationVerb::Install => Some(MutationVerb::Remove),
+        MutationVerb::Remove => None,
     }
 }
 
@@ -358,6 +623,7 @@ pub fn mutation_target_name(target: &MutationTarget) -> &str {
     match target {
         MutationTarget::Container { name, .. } => name,
         MutationTarget::Service { name, .. } => name,
+        MutationTarget::ContainerInstall { spec, .. } => &spec.name,
     }
 }
 
@@ -543,7 +809,7 @@ mod execution_tests {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VerificationResult {
     pub success: bool,
     pub command: String,
@@ -559,25 +825,18 @@ pub fn verification_command(
         MutationTarget::Container {
             runtime: RuntimeKind::Docker,
             name,
-        } => Some(crate::provision::model::CommandPlan {
-            program: "docker".to_string(),
-            args: vec![
-                "inspect".to_string(),
-                "--format={{.State.Running}}".to_string(),
-                name.clone(),
-            ],
-        }),
+        } => Some(container_inspect_plan("docker", name)),
         MutationTarget::Container {
             runtime: RuntimeKind::Podman,
             name,
-        } => Some(crate::provision::model::CommandPlan {
-            program: "podman".to_string(),
-            args: vec![
-                "inspect".to_string(),
-                "--format={{.State.Running}}".to_string(),
-                name.clone(),
-            ],
-        }),
+        } => Some(container_inspect_plan("podman", name)),
+        MutationTarget::ContainerInstall { runtime, spec } => Some(container_inspect_plan(
+            match runtime {
+                RuntimeKind::Docker => "docker",
+                RuntimeKind::Podman => "podman",
+            },
+            &spec.name,
+        )),
         MutationTarget::Service {
             init: InitKind::Systemd,
             name,
@@ -595,6 +854,17 @@ pub fn verification_command(
     }
 }
 
+fn container_inspect_plan(program: &str, name: &str) -> crate::provision::model::CommandPlan {
+    crate::provision::model::CommandPlan {
+        program: program.to_string(),
+        args: vec![
+            "inspect".to_string(),
+            "--format={{.State.Running}}".to_string(),
+            name.to_string(),
+        ],
+    }
+}
+
 pub fn build_rollback_plan(
     backend: &dyn MutationBackend,
     target: &MutationTarget,
@@ -605,7 +875,18 @@ pub fn build_rollback_plan(
             "unreversible lifecycle mutation".to_string(),
         ));
     };
-    backend.plan(target, &reverse)
+    match target {
+        // Rolling back an install removes the container it creates, so the
+        // rollback targets that container rather than the specification.
+        MutationTarget::ContainerInstall { runtime, spec } => {
+            let created = MutationTarget::Container {
+                runtime: runtime.clone(),
+                name: spec.name.clone(),
+            };
+            backend.plan(&created, &reverse)
+        }
+        _ => backend.plan(target, &reverse),
+    }
 }
 
 pub fn verify_mutation(

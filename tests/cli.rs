@@ -117,3 +117,177 @@ fn runtime_json_exits_success() {
     assert!(stdout.contains("container_runtimes"));
     assert!(stdout.contains("provider_integration"));
 }
+
+#[test]
+fn catalog_list_exits_success() {
+    let output = Command::new(bin())
+        .arg("catalog")
+        .arg("list")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("catalog entries="));
+}
+
+#[test]
+fn catalog_list_json_exits_success() {
+    let output = Command::new(bin())
+        .arg("catalog")
+        .arg("list")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"apps\""));
+    assert!(stdout.contains("\"categories\""));
+}
+
+#[test]
+fn catalog_show_prints_the_entry() {
+    let output = Command::new(bin())
+        .arg("catalog")
+        .arg("show")
+        .arg("nginx")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("id=nginx"));
+    assert!(stdout.contains("image=nginx:alpine"));
+}
+
+#[test]
+fn catalog_show_rejects_an_unknown_entry() {
+    let output = Command::new(bin())
+        .arg("catalog")
+        .arg("show")
+        .arg("does-not-exist")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn catalog_install_dry_run_prints_the_command_without_touching_the_host() {
+    let output = Command::new(bin())
+        .arg("catalog")
+        .arg("install")
+        .arg("nginx")
+        .arg("--dry-run")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("docker run"));
+    assert!(stdout.contains("nginx:alpine"));
+    assert!(stdout.contains("nothing was changed"));
+}
+
+#[test]
+fn catalog_install_without_root_is_refused() {
+    // The integration tests never run as root in CI, so an install without
+    // --dry-run has to be refused rather than executed.
+    if effective_uid() == 0 {
+        return;
+    }
+
+    let output = Command::new(bin())
+        .arg("catalog")
+        .arg("install")
+        .arg("nginx")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn catalog_update_writes_a_validated_index() {
+    let directory = tempfile_dir("catalog-update");
+    let source = directory.join("catalog.toml");
+    fs::write(
+        &source,
+        r#"
+version = 1
+
+[[apps]]
+id = "demo"
+name = "Demo"
+category = "testing"
+image = "nginx:alpine"
+"#,
+    )
+    .unwrap();
+
+    let config_home = directory.join("xdg");
+    let output = Command::new(bin())
+        .arg("catalog")
+        .arg("update")
+        .arg("--from-file")
+        .arg(&source)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let written = config_home.join("anvil/catalog.toml");
+    assert!(written.is_file());
+
+    // The written index is picked up by a subsequent listing.
+    let listed = Command::new(bin())
+        .arg("catalog")
+        .arg("list")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let stdout = String::from_utf8(listed.stdout).unwrap();
+    assert!(stdout.contains("demo"));
+}
+
+#[test]
+fn catalog_update_rejects_an_invalid_index() {
+    let directory = tempfile_dir("catalog-update-invalid");
+    let source = directory.join("catalog.toml");
+    fs::write(
+        &source,
+        r#"
+version = 1
+
+[[apps]]
+id = "demo"
+name = "Demo"
+category = "testing"
+image = "nginx; rm -rf /"
+"#,
+    )
+    .unwrap();
+
+    let config_home = directory.join("xdg");
+    let output = Command::new(bin())
+        .arg("catalog")
+        .arg("update")
+        .arg("--from-file")
+        .arg(&source)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!config_home.join("anvil/catalog.toml").exists());
+}
+
+/// The effective uid of the test process, read without pulling in a crate.
+fn effective_uid() -> u32 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    status
+        .lines()
+        .find(|line| line.starts_with("Uid:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1000)
+}

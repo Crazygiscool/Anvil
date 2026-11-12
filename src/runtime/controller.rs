@@ -7,6 +7,7 @@ use crate::runtime::mutation::{
     MutationBackend, MutationExecutionReceipt, MutationMode, MutationPlan, MutationTarget,
     MutationVerb, build_rollback_plan, rollback_verb, verify_mutation,
 };
+use serde::Serialize;
 use std::ops::Deref;
 use std::sync::Arc;
 #[derive(Clone)]
@@ -15,7 +16,7 @@ pub struct MutationController {
     runner: Arc<dyn CommandRunner + Send + Sync>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ControllerReceipt {
     pub target: MutationTarget,
     pub verb: MutationVerb,

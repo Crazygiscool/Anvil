@@ -1,5 +1,6 @@
 mod access;
 mod app;
+mod catalog;
 mod cli;
 mod config;
 mod discovery;
@@ -17,7 +18,7 @@ use crate::plugins::PluginBackend;
 use anyhow::Context;
 use app::AppRuntime;
 use clap::Parser;
-use cli::{Cli, Commands};
+use cli::{CatalogCommands, Cli, Commands};
 use config::load as load_config;
 use error::AnvilError;
 use platform::OsTextReader;
@@ -252,6 +253,212 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Some(Commands::Catalog { command }) => {
+            let runner: Arc<dyn platform::CommandRunner + Send + Sync> = command_runner.clone();
+            run_catalog(command, access, &runner).await
+        }
+    }
+}
+
+/// Run a catalog subcommand.
+async fn run_catalog(
+    command: CatalogCommands,
+    access: access::AccessContext,
+    runner: &Arc<dyn platform::CommandRunner + Send + Sync>,
+) -> anyhow::Result<()> {
+    match command {
+        CatalogCommands::List { json, category } => {
+            let index = catalog::load_index()?;
+            let entries: Vec<&catalog::CatalogEntry> = match &category {
+                Some(category) => index
+                    .apps
+                    .iter()
+                    .filter(|entry| &entry.category == category)
+                    .collect(),
+                None => index.apps.iter().collect(),
+            };
+
+            if json {
+                let payload = serde_json::to_string_pretty(&serde_json::json!({
+                    "version": index.version,
+                    "categories": index.categories(),
+                    "apps": entries,
+                }))?;
+                println!("{}", payload);
+                return Ok(());
+            }
+
+            println!(
+                "catalog entries={} categories={}",
+                entries.len(),
+                index.categories().len()
+            );
+            for entry in entries {
+                println!(
+                    "  - {} | {} | {} | {}",
+                    entry.id, entry.category, entry.image, entry.name
+                );
+            }
+            Ok(())
+        }
+        CatalogCommands::Show { id, json } => {
+            let index = catalog::load_index()?;
+            let entry = index.find(&id).ok_or_else(|| {
+                AnvilError::Config(format!("catalog entry '{id}' does not exist"))
+            })?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(entry)?);
+                return Ok(());
+            }
+
+            print_catalog_entry(entry);
+            Ok(())
+        }
+        CatalogCommands::Install { id, json, dry_run } => {
+            let index = catalog::load_index()?;
+            let entry = index.find(&id).ok_or_else(|| {
+                AnvilError::Config(format!("catalog entry '{id}' does not exist"))
+            })?;
+
+            let backend = catalog::backend_for(&entry.runtime).ok_or_else(|| {
+                AnvilError::Config(format!(
+                    "catalog entry '{id}': unsupported runtime '{}'",
+                    entry.runtime
+                ))
+            })?;
+            let target = catalog::install_target(entry)?;
+
+            if dry_run {
+                // A dry run only prints the command that would run. It never
+                // touches the host, so it does not need the mutation gate.
+                let plan = catalog::install_plan(entry)?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "id": entry.id,
+                            "dry_run": true,
+                            "executed": false,
+                            "plan": {
+                                "program": plan.program,
+                                "args": plan.args,
+                                "command": plan.command_line(),
+                                "summary": plan.summary,
+                            },
+                        }))?
+                    );
+                } else {
+                    println!("catalog install id={}", entry.id);
+                    println!("  command: {}", plan.command_line());
+                    println!("  result: planned (dry-run), nothing was changed");
+                }
+                return Ok(());
+            }
+
+            let controller =
+                runtime::MutationController::new(access, mutation_mode(false), Arc::clone(runner));
+            let receipt =
+                controller.execute(backend, &target, &runtime::mutation::MutationVerb::Install)?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&receipt_json(&receipt))?);
+                return Ok(());
+            }
+
+            println!("catalog install id={}", entry.id);
+            println!("  command: {}", receipt.plan.command_line());
+            if receipt.execution.executed {
+                println!("  result: executed");
+            } else {
+                println!("  result: planned (dry-run), nothing was changed");
+            }
+            if let Some(verification) = &receipt.verification {
+                println!(
+                    "  verification: {} ({})",
+                    if verification.success { "ok" } else { "failed" },
+                    verification.command
+                );
+            }
+            if let Some(rollback) = &receipt.rollback {
+                println!(
+                    "  rollback: {} {}",
+                    rollback.program,
+                    rollback.args.join(" ")
+                );
+            }
+            Ok(())
+        }
+        CatalogCommands::Update { from_file } => {
+            // The file is validated before it replaces anything, so a broken
+            // index can never take the catalog down.
+            let index = catalog::read_index(&from_file)?;
+            let target = catalog::default_index_path();
+
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| AnvilError::Io {
+                    path: parent.to_path_buf(),
+                    source: error,
+                })?;
+            }
+            let rendered = toml::to_string_pretty(&index).map_err(|error| {
+                AnvilError::Config(format!("catalog index could not be encoded: {error}"))
+            })?;
+            std::fs::write(&target, rendered).map_err(|error| AnvilError::Io {
+                path: target.clone(),
+                source: error,
+            })?;
+
+            println!(
+                "catalog updated entries={} source={} target={}",
+                index.apps.len(),
+                from_file.display(),
+                target.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// The mutation mode for a catalog install.
+///
+/// An install only touches the host when it runs as root with
+/// `ANVIL_ALLOW_MUTATION=1`; `--dry-run` always plans without executing.
+fn mutation_mode(dry_run: bool) -> runtime::mutation::MutationMode {
+    if dry_run {
+        return runtime::mutation::MutationMode::DryRun;
+    }
+    if std::env::var("ANVIL_ALLOW_MUTATION").ok().as_deref() == Some("1") {
+        runtime::mutation::MutationMode::Execute
+    } else {
+        runtime::mutation::MutationMode::DryRun
+    }
+}
+
+fn receipt_json(receipt: &runtime::controller::ControllerReceipt) -> serde_json::Value {
+    serde_json::to_value(receipt).unwrap_or_else(|_| serde_json::json!({}))
+}
+fn print_catalog_entry(entry: &catalog::CatalogEntry) {
+    println!("id={}", entry.id);
+    println!("name={}", entry.name);
+    if !entry.description.is_empty() {
+        println!("description={}", entry.description);
+    }
+    println!("category={}", entry.category);
+    println!("image={}", entry.image);
+    println!("runtime={}", entry.runtime);
+    println!("restart_policy={}", entry.restart_policy);
+    for port in &entry.ports {
+        println!("port={}:{}/{}", port.host, port.container, port.protocol);
+    }
+    for volume in &entry.volumes {
+        println!(
+            "volume={} kind={} target={}",
+            volume.source, volume.kind, volume.target
+        );
+    }
+    for (key, value) in &entry.env {
+        println!("env={key}={value}");
     }
 }
 
