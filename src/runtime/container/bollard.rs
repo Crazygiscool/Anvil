@@ -19,9 +19,21 @@ use futures_util::stream::StreamExt;
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// How long the daemon may take to answer a request, in seconds.
-const REQUEST_TIMEOUT_SECONDS: u64 = 30;
+///
+/// The timeout covers the whole request, so it has to leave room for an
+/// image pull: a catalog entry can pull tens of megabytes, and a pull that
+/// is cut off half way leaves a broken image behind.
+const REQUEST_TIMEOUT_SECONDS: u64 = 300;
+
+/// How long the initial version probe may take, in seconds.
+///
+/// A local daemon answers in milliseconds. The probe is given a short
+/// budget of its own so that a daemon which accepts connections but never
+/// answers cannot hold up start-up for the full request timeout.
+const INITIAL_PROBE_TIMEOUT_SECONDS: u64 = 10;
 
 /// A job for the worker thread.
 type Job = Box<dyn FnOnce(&Docker, &tokio::runtime::Runtime) + Send>;
@@ -46,6 +58,11 @@ impl BollardContainerClient {
     ///
     /// The client is created once and reused; the daemon is not probed for
     /// its version on every call.
+    ///
+    /// The daemon is asked for its version before this returns, so the
+    /// client already knows whether the daemon is reachable. Without that
+    /// wait the first read after connecting would race the probe and report
+    /// a healthy daemon as unreachable.
     pub fn connect(runtime: &str, socket: &str) -> Result<Self> {
         let docker = Docker::connect_with_unix(
             socket,
@@ -59,28 +76,48 @@ impl BollardContainerClient {
         })?;
 
         let (sender, receiver) = mpsc::channel::<Job>();
+        let (ready_sender, ready_receiver) = mpsc::channel::<()>();
         let state = Arc::new(Mutex::new(DaemonState::default()));
 
         let worker_state = Arc::clone(&state);
         std::thread::Builder::new()
             .name(format!("anvil-{runtime}-api"))
             .spawn(move || {
-                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                else {
-                    return;
+                {
+                    Ok(runtime) => runtime,
+                    Err(_) => {
+                        // The caller waits for this signal, so it has to be
+                        // sent even when the runtime could not be built.
+                        let _ = ready_sender.send(());
+                        return;
+                    }
                 };
 
                 // Learn the daemon version once, so the status line does not
-                // have to be re-probed on every refresh.
-                let version = runtime.block_on(async { docker.version().await });
-                if let Ok(version) = version
+                // have to be re-probed on every refresh. The probe gets a
+                // short budget of its own, so a daemon that accepts the
+                // connection but never answers cannot hold up start-up.
+                let version = runtime.block_on(async {
+                    tokio::time::timeout(
+                        Duration::from_secs(INITIAL_PROBE_TIMEOUT_SECONDS),
+                        docker.version(),
+                    )
+                    .await
+                    .ok()
+                    .and_then(|version| version.ok())
+                });
+                if let Some(version) = version
                     && let Ok(mut guard) = worker_state.lock()
                 {
                     guard.reachable = true;
                     guard.status = version.version.clone();
                 }
+
+                // The probe is done; the caller may look at the state now.
+                let _ = ready_sender.send(());
 
                 while let Ok(job) = receiver.recv() {
                     job(&docker, &runtime);
@@ -91,6 +128,11 @@ impl BollardContainerClient {
                     "{runtime}: the container API worker thread did not start: {error}"
                 ))
             })?;
+
+        // Wait for the initial probe. A timeout here means the daemon did
+        // not answer, which the state already records; the client is still
+        // usable, because a later request may reach the daemon.
+        let _ = ready_receiver.recv_timeout(Duration::from_secs(INITIAL_PROBE_TIMEOUT_SECONDS + 5));
 
         Ok(Self {
             runtime: runtime.to_string(),
@@ -154,7 +196,9 @@ impl BollardContainerClient {
                 Ok(value)
             }
             Err(error) => {
-                self.record(false);
+                // A daemon that answers with an error has answered. Only a
+                // transport failure means the daemon could not be reached.
+                self.record(!daemon_answered(&error));
                 Err(AnvilError::Runtime(format!(
                     "{}: the daemon returned an error: {error}",
                     self.runtime
@@ -368,9 +412,11 @@ impl ContainerClient for BollardContainerClient {
                     })
                     .collect();
 
+                let (policy_name, maximum_retry_count) = restart_policy(&request.restart_policy);
+
                 let restart_policy = RestartPolicy {
-                    name: Some(restart_policy_name(&request.restart_policy)),
-                    maximum_retry_count: None,
+                    name: Some(policy_name),
+                    maximum_retry_count,
                 };
 
                 let host_config = HostConfig {
@@ -410,14 +456,42 @@ impl ContainerClient for BollardContainerClient {
     }
 }
 
-/// The restart policy name the daemon understands.
-fn restart_policy_name(policy: &str) -> RestartPolicyNameEnum {
-    match policy {
+/// Whether the daemon answered, even if the answer was an error.
+///
+/// A daemon that reports "no such container" is a reachable daemon. Only a
+/// transport-level failure — a refused connection, a timeout — means the
+/// daemon could not be reached at all.
+fn daemon_answered(error: &bollard::errors::Error) -> bool {
+    matches!(
+        error,
+        bollard::errors::Error::DockerResponseServerError { .. }
+            | bollard::errors::Error::DockerStreamError { .. }
+            | bollard::errors::Error::DockerContainerWaitError { .. }
+            | bollard::errors::Error::JsonDataError { .. }
+            | bollard::errors::Error::JsonSerdeError { .. }
+    )
+}
+
+/// The restart policy the daemon understands.
+///
+/// The catalog accepts a retry count after the policy name, as in
+/// `on-failure:5`. The daemon takes the count as a separate field, so it is
+/// split off here rather than being passed through as part of the name.
+fn restart_policy(policy: &str) -> (RestartPolicyNameEnum, Option<i64>) {
+    let (name, retries) = match policy.split_once(':') {
+        Some((name, count)) => (name, count.parse::<i64>().ok()),
+        None => (policy, None),
+    };
+
+    let name = match name {
+        "no" => RestartPolicyNameEnum::NO,
         "always" => RestartPolicyNameEnum::ALWAYS,
         "on-failure" => RestartPolicyNameEnum::ON_FAILURE,
         "unless-stopped" => RestartPolicyNameEnum::UNLESS_STOPPED,
         _ => RestartPolicyNameEnum::EMPTY,
-    }
+    };
+
+    (name, retries)
 }
 
 #[cfg(test)]
@@ -429,6 +503,74 @@ mod tests {
     /// The marker the CI job greps for, so a skipped test cannot pass
     /// unnoticed.
     pub const RAN_MARKER: &str = "container api test ran against";
+
+    /// The restart policy the daemon is told about.
+    #[test]
+    fn the_restart_policy_is_the_one_the_daemon_understands() {
+        assert_eq!(
+            restart_policy("no"),
+            (RestartPolicyNameEnum::NO, None),
+            "the no-restart policy has its own name, not an empty one"
+        );
+        assert_eq!(
+            restart_policy("always"),
+            (RestartPolicyNameEnum::ALWAYS, None)
+        );
+        assert_eq!(
+            restart_policy("unless-stopped"),
+            (RestartPolicyNameEnum::UNLESS_STOPPED, None)
+        );
+        assert_eq!(
+            restart_policy("on-failure"),
+            (RestartPolicyNameEnum::ON_FAILURE, None)
+        );
+    }
+
+    /// The retry count in `on-failure:5` reaches the daemon as a number.
+    #[test]
+    fn a_restart_policy_retry_count_is_not_dropped() {
+        assert_eq!(
+            restart_policy("on-failure:5"),
+            (RestartPolicyNameEnum::ON_FAILURE, Some(5))
+        );
+        assert_eq!(
+            restart_policy("unless-stopped:5"),
+            (RestartPolicyNameEnum::UNLESS_STOPPED, Some(5))
+        );
+    }
+
+    /// An unknown policy is not silently turned into a valid one.
+    #[test]
+    fn an_unknown_restart_policy_is_not_accepted() {
+        assert_eq!(
+            restart_policy("sometimes"),
+            (RestartPolicyNameEnum::EMPTY, None)
+        );
+        assert_eq!(
+            restart_policy("on-failure:many"),
+            (RestartPolicyNameEnum::ON_FAILURE, None),
+            "a retry count that is not a number is left out"
+        );
+    }
+
+    /// A daemon that answers with an error has answered.
+    #[test]
+    fn a_daemon_error_still_counts_as_an_answer() {
+        let answered = bollard::errors::Error::DockerResponseServerError {
+            status_code: 404,
+            message: "No such container: anvil-api-test".to_string(),
+        };
+        assert!(
+            daemon_answered(&answered),
+            "a daemon that reports a missing container is a reachable daemon"
+        );
+
+        let transport = bollard::errors::Error::RequestTimeoutError;
+        assert!(
+            !daemon_answered(&transport),
+            "a timeout means the daemon did not answer"
+        );
+    }
 
     /// The Docker socket on this host, if there is one.
     fn docker_socket() -> Option<PathBuf> {
