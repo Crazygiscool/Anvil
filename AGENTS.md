@@ -118,6 +118,7 @@ Phases 1–14 are the only record of the original roadmap, so they are kept here
 | 17 | Real catalog index, validation, `anvil catalog` CLI, catalog tab | `9e3828d`, `9bcac18` |
 | 18 | Container API through `bollard`, structured inspection, client caching, CI smoke job | `a9d2e07`, `beb4669`, `4bedd75` |
 | 19 | Docs and release alignment: architecture, roadmap, catalog, plugins, README, v0.2.0 | `956a3c9`, `971e067`, `9292ddb`, `37b137a`, `633fae8` |
+| 20 | Init services read for real and mutable, the pull-before-create fix, meaningful exit codes, the dead code removed | `a6bd2a0`, `5b29fc3`, `a806dc0`, `9cf6d82` |
 
 ## Paths & Standards
 
