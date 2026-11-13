@@ -291,3 +291,53 @@ fn effective_uid() -> u32 {
         .and_then(|value| value.parse().ok())
         .unwrap_or(1000)
 }
+
+/// A configuration that cannot be found is a configuration error, which the
+/// CLI reports with exit code 2.
+#[test]
+fn a_missing_config_file_exits_with_the_configuration_code() {
+    let output = Command::new(bin())
+        .arg("--config")
+        .arg("/nonexistent/anvil/config.toml")
+        .arg("discover")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+}
+
+/// A manifest with the wrong version is a configuration error too.
+#[test]
+fn a_manifest_with_the_wrong_version_exits_with_the_configuration_code() {
+    let directory = tempfile_dir("manifest-wrong-version-code");
+    let manifest = directory.join("manifest.toml");
+    fs::write(&manifest, "version = 2\n").unwrap();
+
+    let output = Command::new(bin())
+        .arg("apply")
+        .arg("--manifest")
+        .arg(&manifest)
+        .arg("--dry-run")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+}
+
+/// A mutation that the session is not allowed to make is a permission
+/// error, which the CLI reports with exit code 3.
+#[test]
+fn a_refused_mutation_exits_with_the_permission_code() {
+    if effective_uid() == 0 {
+        return;
+    }
+
+    let output = Command::new(bin())
+        .arg("catalog")
+        .arg("install")
+        .arg("nginx")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(3));
+}

@@ -44,7 +44,13 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
-            ExitCode::FAILURE
+            // The exit code says what went wrong, so a script can tell a
+            // permission problem from a broken configuration.
+            let code = match error.downcast_ref::<AnvilError>() {
+                Some(anvil) => anvil.exit_code(),
+                None => 1,
+            };
+            ExitCode::from(code)
         }
     }
 }
