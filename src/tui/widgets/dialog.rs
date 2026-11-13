@@ -63,6 +63,11 @@ impl ActionMenu {
         self.visible
     }
 
+    /// The action the cursor is on.
+    ///
+    /// The tabs act on the index the menu returns, so this is only used by
+    /// the tests.
+    #[cfg(test)]
     pub fn selected_action(&self) -> Option<&Action> {
         self.state.selected().map(|i| &self.actions[i])
     }

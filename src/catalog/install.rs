@@ -104,27 +104,6 @@ pub fn install_plan(entry: &CatalogEntry) -> Result<MutationPlan> {
     backend.plan(&target, &MutationVerb::Install)
 }
 
-/// Plan the removal of an installed catalog entry.
-pub fn uninstall_plan(entry: &CatalogEntry) -> Result<MutationPlan> {
-    let backend = backend_for(&entry.runtime).ok_or_else(|| {
-        AnvilError::Config(format!(
-            "catalog entry '{}': unsupported runtime '{}'",
-            entry.id, entry.runtime
-        ))
-    })?;
-    let Some(runtime) = runtime_kind(&entry.runtime) else {
-        return Err(AnvilError::Config(format!(
-            "catalog entry '{}': unsupported runtime '{}'",
-            entry.id, entry.runtime
-        )));
-    };
-    let target = MutationTarget::Container {
-        runtime,
-        name: entry.id.clone(),
-    };
-    backend.plan(&target, &MutationVerb::Remove)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,14 +161,6 @@ mod tests {
         entry.runtime = "containerd".to_string();
 
         assert!(install_plan(&entry).is_err());
-    }
-
-    #[test]
-    fn uninstall_plan_removes_the_container() {
-        let plan = uninstall_plan(&entry()).unwrap();
-
-        assert_eq!(plan.program, "docker");
-        assert_eq!(plan.args, vec!["rm", "-f", "web"]);
     }
 
     #[test]

@@ -677,7 +677,7 @@ mod tests {
         let access = AccessContext {
             tier: AccessTier::Root,
         };
-        let mut state = AppState::bootstrap(Config::default(), access, Vec::new());
+        let mut state = AppState::bootstrap(Config::default(), access);
         state.mutation_controller = Some(MutationController::new(
             access,
             MutationMode::Execute,
@@ -819,7 +819,7 @@ mod tests {
         let access = AccessContext {
             tier: AccessTier::ReadOnly,
         };
-        let mut state = AppState::bootstrap(Config::default(), access, Vec::new());
+        let mut state = AppState::bootstrap(Config::default(), access);
         state.mutation_controller = Some(MutationController::new(
             access,
             MutationMode::Execute,

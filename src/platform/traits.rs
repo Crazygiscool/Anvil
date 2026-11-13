@@ -2,7 +2,6 @@ use std::io;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CommandOutput {
     pub status: Option<i32>,
     pub stdout: String,
@@ -15,7 +14,6 @@ pub trait TextReader: Send + Sync {
     fn exists(&self, path: &Path) -> bool;
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct OsTextReader;
 
@@ -42,7 +40,6 @@ pub trait CommandRunner: Send + Sync {
     fn run(&self, program: &Path, args: &[&str]) -> Result<CommandOutput, io::Error>;
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct OsCommandRunner;
 

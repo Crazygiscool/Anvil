@@ -6,7 +6,6 @@
 
 // The catalog is a public API of the crate; not every entry point is wired
 // into a command or a tab yet.
-#![allow(dead_code)]
 
 pub mod index;
 pub mod install;
@@ -18,8 +17,6 @@ pub use index::{
     standard_index_paths, validate_entry, validate_index,
 };
 #[allow(unused_imports)]
-pub use install::{
-    backend_for, container_spec, install_plan, install_target, runtime_kind, uninstall_plan,
-};
+pub use install::{backend_for, container_spec, install_plan, install_target, runtime_kind};
 #[allow(unused_imports)]
 pub use model::{CatalogEntry, CatalogIndex, CatalogPort, CatalogVolume, SUPPORTED_INDEX_VERSION};

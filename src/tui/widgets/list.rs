@@ -109,11 +109,6 @@ impl SelectableListState {
         self.list_state.select(Some(prev));
     }
 
-    /// Get currently selected item index (in filtered list).
-    pub fn selected_filtered(&self) -> Option<usize> {
-        self.list_state.selected()
-    }
-
     /// Get currently selected item index (in original list).
     pub fn selected_original(&self) -> Option<usize> {
         self.list_state
@@ -159,6 +154,31 @@ impl SelectableListState {
             self.sort_by = Some(key);
             self.sort_desc = false;
         }
+        self.rebuild_filtered(items);
+    }
+
+    /// Cycle the sort key: title, subtitle, id, and then no sorting.
+    pub fn cycle_sort<T: SelectableItem>(&mut self, items: &[T]) {
+        let next = match self.sort_by {
+            Some(SortKey::Title) => Some(SortKey::Subtitle),
+            Some(SortKey::Subtitle) => Some(SortKey::Id),
+            Some(SortKey::Id) => None,
+            None => Some(SortKey::Title),
+        };
+
+        match next {
+            Some(key) => self.toggle_sort(key, items),
+            None => {
+                self.sort_by = None;
+                self.sort_desc = false;
+                self.rebuild_filtered(items);
+            }
+        }
+    }
+
+    /// Reverse the sort order.
+    pub fn reverse_sort<T: SelectableItem>(&mut self, items: &[T]) {
+        self.sort_desc = !self.sort_desc;
         self.rebuild_filtered(items);
     }
 
@@ -263,25 +283,14 @@ impl<T: SelectableItem> ListWidget<T> {
         }
     }
 
-    pub fn add_item(&mut self, item: T) {
-        self.items.push(item);
-        self.state.rebuild_filtered(&self.items);
-    }
-
-    pub fn remove_item(&mut self, id: &str) -> bool {
-        if let Some(pos) = self.items.iter().position(|i| i.id() == id) {
-            self.items.remove(pos);
-            self.state.rebuild_filtered(&self.items);
-            true
-        } else {
-            false
-        }
-    }
-
     pub fn selected(&self) -> Option<&T> {
         self.state.selected_item(&self.items)
     }
 
+    /// The index of the selected item in the unfiltered list.
+    ///
+    /// Only used by the tests.
+    #[cfg(test)]
     pub fn selected_index(&self) -> Option<usize> {
         self.state.selected_original()
     }
@@ -324,19 +333,11 @@ impl<T: SelectableItem> ListWidget<T> {
             }
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 // Cycle sort: Title -> Subtitle -> Id -> None
-                self.state.sort_by = match self.state.sort_by {
-                    Some(SortKey::Title) => Some(SortKey::Subtitle),
-                    Some(SortKey::Subtitle) => Some(SortKey::Id),
-                    Some(SortKey::Id) => None,
-                    None => Some(SortKey::Title),
-                };
-                self.state.sort_desc = false;
-                self.state.rebuild_filtered(&self.items);
+                self.state.cycle_sort(&self.items);
                 true
             }
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.state.sort_desc = !self.state.sort_desc;
-                self.state.rebuild_filtered(&self.items);
+                self.state.reverse_sort(&self.items);
                 true
             }
 

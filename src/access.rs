@@ -6,7 +6,6 @@ pub enum AccessTier {
     Root,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct AccessContext {
     pub tier: AccessTier,
@@ -24,7 +23,6 @@ impl AccessContext {
         Self { tier }
     }
 
-    #[allow(dead_code)]
     pub fn allows_mutation(&self) -> bool {
         matches!(self.tier, AccessTier::Root)
     }

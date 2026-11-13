@@ -38,11 +38,6 @@ impl CliContainerClient {
         }
     }
 
-    /// The binary the client drives.
-    pub fn binary(&self) -> &str {
-        &self.binary
-    }
-
     /// Run a command line against the runtime.
     fn run(&self, args: &[&str]) -> Result<crate::platform::CommandOutput> {
         let output = self

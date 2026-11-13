@@ -1,14 +1,12 @@
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[allow(dead_code)]
 #[serde(rename_all = "snake_case")]
 pub enum InterfaceKind {
     Physical,
     Virtual,
     Loopback,
-    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -144,9 +142,4 @@ impl DiscoveryReport {
             diagnostics: Vec::new(),
         }
     }
-}
-
-#[allow(dead_code)]
-pub fn source_name(path: &Path) -> String {
-    path.display().to_string()
 }

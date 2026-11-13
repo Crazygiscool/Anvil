@@ -6,7 +6,6 @@ use crate::error::Result;
 use crate::platform::{CommandRunner, TextReader};
 use crate::runtime::container::ContainerClients;
 use crate::tui::run_tui;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 
@@ -23,12 +22,11 @@ impl AppRuntime {
     pub fn bootstrap(
         config: Config,
         access: AccessContext,
-        manifest_paths: Vec<PathBuf>,
         reader: Arc<dyn TextReader + Send + Sync>,
         runner: Arc<dyn CommandRunner + Send + Sync>,
     ) -> Self {
         let (sender, _) = broadcast::channel(1024);
-        let state = AppState::bootstrap(config, access, manifest_paths);
+        let state = AppState::bootstrap(config, access);
         let clients =
             crate::runtime::container::discover_clients(reader.as_ref(), Arc::clone(&runner));
         Self {
@@ -38,11 +36,6 @@ impl AppRuntime {
             clients,
             events: sender,
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn events(&self) -> broadcast::Sender<AppEvent> {
-        self.events.clone()
     }
 
     pub async fn run_tui(&self, refresh_rate: u64) -> Result<()> {

@@ -3,20 +3,6 @@ use crate::provision::model::*;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-#[allow(dead_code)]
-pub trait Provisioner: Send + Sync {
-    fn plan(&self, jobs: &[ManifestJob]) -> Result<ProvisionPlan, AnvilError>;
-}
-
-#[allow(dead_code)]
-pub struct StandardProvisioner;
-
-impl Provisioner for StandardProvisioner {
-    fn plan(&self, jobs: &[ManifestJob]) -> Result<ProvisionPlan, AnvilError> {
-        plan_manifest_jobs(jobs)
-    }
-}
-
 pub fn parse_provisioning_manifest(path: &Path) -> Result<ProvisioningManifest, AnvilError> {
     let source = std::fs::read_to_string(path).map_err(|error| AnvilError::Io {
         path: path.to_path_buf(),
@@ -63,14 +49,6 @@ pub fn validate_manifest(manifest: &ProvisioningManifest, path: &Path) -> Result
         }
     }
     Ok(())
-}
-
-#[allow(dead_code)]
-pub fn validate_top_level_version(
-    manifest: &ProvisioningManifest,
-    path: &Path,
-) -> Result<(), AnvilError> {
-    validate_manifest(manifest, path)
 }
 
 pub fn load_manifest_jobs(input: PathBuf) -> Result<Vec<ManifestJob>, AnvilError> {

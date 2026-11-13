@@ -102,9 +102,3 @@ pub struct CatalogVolume {
     #[serde(default = "default_volume_kind")]
     pub kind: String,
 }
-
-impl CatalogVolume {
-    pub fn is_bind(&self) -> bool {
-        self.kind == "bind"
-    }
-}

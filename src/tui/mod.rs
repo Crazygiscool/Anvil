@@ -101,7 +101,6 @@ pub async fn run_tui(
 
     let mut telemetry_task = tokio::spawn({
         let state = state.clone();
-        let events = events.clone();
         async move {
             let mut interval = tokio::time::interval(interval_duration);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -110,19 +109,17 @@ pub async fn run_tui(
             let startup_sample = sampler.sample(reader.as_ref());
             {
                 let mut guard = state.write().await;
-                guard.telemetry = Some(startup_sample.clone());
+                guard.telemetry = Some(startup_sample);
                 guard.running = true;
             }
-            let _ = events.send(AppEvent::TelemetrySample(Box::new(startup_sample)));
 
             loop {
                 interval.tick().await;
                 let sample = sampler.sample(reader.as_ref());
                 if let Ok(mut guard) = state.try_write() {
-                    guard.telemetry = Some(sample.clone());
+                    guard.telemetry = Some(sample);
                     guard.running = true;
                 }
-                let _ = events.send(AppEvent::TelemetrySample(Box::new(sample)));
             }
         }
     });
@@ -157,7 +154,6 @@ pub async fn run_tui(
             event = events.recv() => {
                 match event {
                     Ok(AppEvent::Shutdown) => break Ok(()),
-                    Ok(_) => {}
                     Err(broadcast::error::RecvError::Closed) => break Ok(()),
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                 }

@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(unused_imports)]
 use crate::access::AccessContext;
 use crate::error::AnvilError;
@@ -58,11 +57,6 @@ impl MutationController {
             runner,
             clients,
         }
-    }
-
-    /// The container clients the controller can use.
-    pub fn clients(&self) -> &ContainerClients {
-        &self.clients
     }
 
     pub fn can_mutate(&self) -> bool {
@@ -159,6 +153,10 @@ impl MutationController {
             ContainerApiAction::Restart { name } => client.restart(name)?,
             ContainerApiAction::Remove { name } => client.remove(name)?,
             ContainerApiAction::Create { spec } => {
+                // The daemon does not fetch an image when a container is
+                // created: it answers "no such image" when the image is not
+                // on the host already. The image is therefore pulled first.
+                client.pull(&spec.image)?;
                 let request = ContainerCreateRequest {
                     name: spec.name.clone(),
                     image: spec.image.clone(),
@@ -425,6 +423,70 @@ mod tests {
         );
         let verification = receipt.verification.expect("the mutation is verified");
         assert!(verification.success);
+    }
+
+    /// The daemon does not fetch an image when a container is created, so
+    /// the image has to be pulled first.
+    #[test]
+    fn creating_a_container_pulls_the_image_first() {
+        let runner = Arc::new(StaticRunner { lines: Vec::new() });
+        let mock = crate::runtime::container::MockContainerClient::new("docker");
+        mock.set_details(
+            "web",
+            crate::runtime::container::ContainerDetails {
+                id: "abc".to_string(),
+                name: "web".to_string(),
+                image: "nginx:latest".to_string(),
+                status: "running".to_string(),
+                running: true,
+                ports: Vec::new(),
+            },
+        );
+        let calls = Arc::new(mock);
+        let clients = ContainerClients::new(vec![calls.clone()]);
+
+        let controller = MutationController::with_clients(
+            crate::access::AccessContext {
+                tier: crate::access::AccessTier::Root,
+            },
+            MutationMode::Execute,
+            Arc::clone(&runner) as Arc<dyn crate::platform::CommandRunner + Send + Sync>,
+            clients,
+        );
+
+        let target = MutationTarget::ContainerInstall {
+            runtime: crate::runtime::mutation::RuntimeKind::Docker,
+            spec: crate::runtime::mutation::ContainerSpec {
+                name: "web".to_string(),
+                image: "nginx:latest".to_string(),
+                ports: Vec::new(),
+                volumes: Vec::new(),
+                env: Vec::new(),
+                restart_policy: "unless-stopped".to_string(),
+            },
+        };
+
+        controller
+            .execute(
+                &crate::runtime::mutation::DockerBackend,
+                &target,
+                &MutationVerb::Install,
+            )
+            .unwrap();
+
+        let calls = calls.calls();
+        let pull = calls
+            .iter()
+            .position(|call| call == "pull nginx:latest")
+            .expect("the image is pulled");
+        let create = calls
+            .iter()
+            .position(|call| call == "create web")
+            .expect("the container is created");
+        assert!(
+            pull < create,
+            "the image has to be on the host before the container is created: {calls:?}"
+        );
     }
 
     /// Without a client the command line runs, as it always did.

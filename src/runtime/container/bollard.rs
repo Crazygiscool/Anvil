@@ -142,11 +142,6 @@ impl BollardContainerClient {
         })
     }
 
-    /// The socket the client talks to.
-    pub fn socket(&self) -> &str {
-        &self.socket
-    }
-
     /// Run a request on the worker thread and wait for its result.
     fn call<T: Send + 'static>(
         &self,

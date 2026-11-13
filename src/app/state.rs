@@ -8,10 +8,8 @@ use crate::runtime::controller::ControllerReceipt;
 use crate::runtime::controller::MutationController;
 use crate::storage::StorageInspection;
 use crate::telemetry::TelemetrySample;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub config: Config,
@@ -21,15 +19,13 @@ pub struct AppState {
     pub runtime: Option<RuntimeInspection>,
     pub plugins: Option<PluginCatalog>,
     pub telemetry: Option<TelemetrySample>,
-    pub manifest_paths: Vec<PathBuf>,
     pub running: bool,
     pub mutation_controller: Option<MutationController>,
     pub mutation_ledger: Vec<ControllerReceipt>,
 }
 
-#[allow(dead_code)]
 impl AppState {
-    pub fn bootstrap(config: Config, access: AccessContext, manifest_paths: Vec<PathBuf>) -> Self {
+    pub fn bootstrap(config: Config, access: AccessContext) -> Self {
         Self {
             config,
             access,
@@ -38,16 +34,10 @@ impl AppState {
             runtime: None,
             plugins: None,
             telemetry: None,
-            manifest_paths,
             running: true,
             mutation_controller: None,
             mutation_ledger: Vec::new(),
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn controller(&self) -> Option<&MutationController> {
-        self.mutation_controller.as_ref()
     }
 
     pub fn plan_runtime_mutation(
@@ -84,14 +74,6 @@ impl AppState {
         Ok(receipt)
     }
 
-    /// Whether this session is allowed to mutate the host.
-    pub fn can_mutate(&self) -> bool {
-        self.mutation_controller
-            .as_ref()
-            .map(|controller| controller.can_mutate())
-            .unwrap_or(false)
-    }
-
     /// The mutation mode of this session.
     ///
     /// `Some(Execute)` means a confirmed mutation really touches the host;
@@ -103,12 +85,9 @@ impl AppState {
             .map(|controller| controller.mode())
     }
 
-    #[allow(dead_code)]
     pub fn mutation_audit(&self) -> &[ControllerReceipt] {
         &self.mutation_ledger
     }
-
-    #[allow(dead_code)]
     fn mutation_controller(&mut self) -> &mut MutationController {
         if self.mutation_controller.is_none() {
             let mode = if std::env::var("ANVIL_ALLOW_MUTATION").ok().as_deref() == Some("1") {
@@ -130,7 +109,6 @@ impl AppState {
 }
 
 impl MutationController {
-    #[allow(dead_code)]
     pub fn default_runner() -> Arc<dyn crate::platform::CommandRunner + Send + Sync> {
         Arc::new(OsCommandRunner)
     }
@@ -142,8 +120,7 @@ mod tests {
 
     #[test]
     fn read_only_controller_does_not_plan_lifecycle_mutation() {
-        let mut state =
-            AppState::bootstrap(Config::default(), AccessContext::detect(false), Vec::new());
+        let mut state = AppState::bootstrap(Config::default(), AccessContext::detect(false));
         let result = state.plan_runtime_mutation(
             &crate::runtime::mutation::SystemdBackend,
             &crate::runtime::mutation::MutationTarget::Service {
@@ -161,7 +138,7 @@ mod tests {
         let access = AccessContext {
             tier: crate::access::AccessTier::Root,
         };
-        let mut state = AppState::bootstrap(Config::default(), access, Vec::new());
+        let mut state = AppState::bootstrap(Config::default(), access);
         state.mutation_controller = Some(MutationController::new(
             access,
             crate::runtime::mutation::MutationMode::DryRun,

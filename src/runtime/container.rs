@@ -14,7 +14,6 @@
 
 // The client API is a complete interface for the container runtimes; not
 // every operation is wired into a command or a tab yet.
-#![allow(dead_code)]
 
 use crate::error::Result;
 use crate::platform::{CommandRunner, TextReader};
@@ -26,13 +25,15 @@ use std::sync::Arc;
 
 pub mod bollard;
 pub mod cli;
+/// The in-memory client the tests use instead of a daemon.
+#[cfg(test)]
 pub mod mock;
 
 #[allow(unused_imports)]
 pub use bollard::BollardContainerClient;
 #[allow(unused_imports)]
 pub use cli::CliContainerClient;
-#[allow(unused_imports)]
+#[cfg(test)]
 pub use mock::MockContainerClient;
 
 /// What the daemon knows about a single container.
@@ -128,6 +129,10 @@ impl ContainerClients {
     }
 
     /// Build a registry from the clients.
+    ///
+    /// The registry that the application uses is built by
+    /// [`discover_clients`]; this constructor is for the tests.
+    #[cfg(test)]
     pub fn new(clients: Vec<Arc<dyn ContainerClient>>) -> Self {
         Self { clients }
     }
@@ -145,6 +150,9 @@ impl ContainerClients {
     }
 
     /// The names of the runtimes that have a client.
+    ///
+    /// Only used by the tests.
+    #[cfg(test)]
     pub fn runtimes(&self) -> Vec<&str> {
         self.clients
             .iter()
@@ -153,6 +161,9 @@ impl ContainerClients {
     }
 
     /// Whether the registry holds any client.
+    ///
+    /// Only used by the tests.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.clients.is_empty()
     }

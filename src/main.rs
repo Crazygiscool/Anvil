@@ -57,7 +57,6 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
     let runtime = AppRuntime::bootstrap(
         config.clone(),
         access,
-        Vec::new(),
         reader.clone(),
         command_runner.clone(),
     );
@@ -541,60 +540,6 @@ fn print_storage_report(report: &crate::storage::StorageInspection) {
             volume.name, volume.volume_group, volume.size, volume.attributes
         );
     }
-}
-
-#[allow(dead_code)]
-fn collect_manifest_paths(input: std::path::PathBuf) -> anyhow::Result<Vec<std::path::PathBuf>> {
-    if input.is_dir() {
-        let mut paths: Vec<_> = std::fs::read_dir(&input)
-            .map_err(|error| AnvilError::Io {
-                path: input.clone(),
-                source: error,
-            })?
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.is_file() && path.extension().and_then(|value| value.to_str()) == Some("toml")
-            })
-            .collect();
-        paths.sort();
-        if paths.is_empty() {
-            return Err(AnvilError::Config(format!(
-                "no TOML manifests found in {}",
-                input.display()
-            ))
-            .into());
-        }
-        Ok(paths)
-    } else {
-        Ok(vec![input])
-    }
-}
-
-#[allow(dead_code)]
-fn validate_manifest_version(path: &std::path::Path, expected: u32) -> anyhow::Result<()> {
-    let source = std::fs::read_to_string(path).map_err(|error| AnvilError::Io {
-        path: path.to_path_buf(),
-        source: error,
-    })?;
-    let value: toml::Value = toml::from_str(&source)
-        .map_err(|error| AnvilError::Config(format!("{}: {error}", path.display())))?;
-    let found = value
-        .get("version")
-        .and_then(toml::Value::as_integer)
-        .map(|value| value as u32)
-        .ok_or_else(|| {
-            AnvilError::Config(format!("{}: missing integer version", path.display()))
-        })?;
-    if found != expected {
-        return Err(AnvilError::ManifestVersion {
-            path: path.to_path_buf(),
-            found,
-            expected,
-        }
-        .into());
-    }
-    Ok(())
 }
 
 fn print_runtime_report(report: &crate::runtime::RuntimeInspection) {

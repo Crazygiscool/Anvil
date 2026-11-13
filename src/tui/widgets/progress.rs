@@ -59,6 +59,11 @@ impl ProgressOverlay {
         self.visible = true;
     }
 
+    /// Start an overlay with a progress that the caller drives.
+    ///
+    /// The mutations report their outcome as one step, so only the tests
+    /// drive the progress themselves.
+    #[cfg(test)]
     pub fn start_determinate(&mut self, message: impl Into<String>) {
         self.message = message.into();
         self.state = ProgressState::Running(0);
@@ -70,10 +75,6 @@ impl ProgressOverlay {
     pub fn set_progress(&mut self, progress: u16) {
         self.progress = progress.min(100);
         self.state = ProgressState::Running(self.progress);
-    }
-
-    pub fn set_message(&mut self, message: impl Into<String>) {
-        self.message = message.into();
     }
 
     pub fn add_detail(&mut self, detail: impl Into<String>) {

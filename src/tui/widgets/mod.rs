@@ -3,8 +3,6 @@
 //! This module is a general-purpose widget toolkit: it exposes a complete API
 //! for each widget, and not every entry point is wired into a tab yet.
 
-#![allow(dead_code)]
-
 pub mod detail;
 pub mod dialog;
 pub mod list;

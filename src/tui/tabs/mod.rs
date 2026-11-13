@@ -280,7 +280,7 @@ mod tests {
     }
 
     fn state() -> AppState {
-        AppState::bootstrap(Config::default(), AccessContext::detect(false), Vec::new())
+        AppState::bootstrap(Config::default(), AccessContext::detect(false))
     }
 
     #[test]

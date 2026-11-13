@@ -51,16 +51,15 @@ impl DetailPane {
         self.sections.push(section);
     }
 
-    pub fn set_sections(&mut self, sections: Vec<DetailSection>) {
-        self.sections = sections;
-    }
-
     pub fn clear(&mut self) {
         self.sections.clear();
         self.scroll_offset = 0;
     }
 
     /// Build detail pane from a simple key-value map.
+    ///
+    /// Only used by the tests; the tabs build their sections directly.
+    #[cfg(test)]
     pub fn from_pairs(title: impl Into<String>, pairs: Vec<(String, String)>) -> Self {
         let mut pane = Self::new(title);
         let section = DetailSection {
