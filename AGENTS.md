@@ -79,6 +79,10 @@ sh scripts/install-runtimes.sh --runtime podman --execute --yes
   it needs root **and** `ANVIL_ALLOW_MUTATION=1`.
 - Container state is read through the Docker API when the runtime exposes a
   socket, and through the runtime's command line otherwise.
+- `connect()` waits for the daemon's version probe, so the client already
+  knows whether the daemon answered when it is handed out.
+- A daemon that answers with an error has answered; only a transport failure
+  marks the daemon unreachable.
 - The UI never shows simulated data: every number comes from a real read, and
   every mutation receipt names the mechanism that carried it out.
 - Plugin report diagnostics distinguish invalid plugins without failing inventory.
@@ -103,8 +107,8 @@ Phases 1–14 are the only record of the original roadmap, so they are kept here
 | 15 | TUI rewrite: tab manager, reusable widgets, honest telemetry and storage tabs | `8fe5e2c`, `b90c929` |
 | 16 | TUI mutation wiring: container lifecycle, live refresh, audit ledger | `378a945` |
 | 17 | Real catalog index, validation, `anvil catalog` CLI, catalog tab | `9e3828d`, `9bcac18` |
-| 18 | Container API through `bollard`, structured inspection, client caching, CI smoke job | `a9d2e07` |
-| 19 | Docs and release alignment: architecture, roadmap, catalog, plugins, README, v0.2.0 | — |
+| 18 | Container API through `bollard`, structured inspection, client caching, CI smoke job | `a9d2e07`, `beb4669`, `4bedd75` |
+| 19 | Docs and release alignment: architecture, roadmap, catalog, plugins, README, v0.2.0 | `956a3c9`, `971e067`, `9292ddb`, `37b137a`, `633fae8` |
 
 ## Paths & Standards
 
