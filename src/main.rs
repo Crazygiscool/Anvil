@@ -544,10 +544,11 @@ fn print_storage_report(report: &crate::storage::StorageInspection) {
 
 fn print_runtime_report(report: &crate::runtime::RuntimeInspection) {
     println!(
-        "container_runtimes={} init={} init_detected={}",
+        "container_runtimes={} init={} init_detected={} services={}",
         report.container_runtimes.len(),
         report.init.kind,
-        report.init.detected
+        report.init.detected,
+        report.init.services.len()
     );
     for runtime in &report.container_runtimes {
         println!(
@@ -564,6 +565,9 @@ fn print_runtime_report(report: &crate::runtime::RuntimeInspection) {
                 container.id, container.name, container.image, container.status
             );
         }
+    }
+    for service in &report.init.services {
+        println!("  service {} {}", service.name, service.state);
     }
 }
 

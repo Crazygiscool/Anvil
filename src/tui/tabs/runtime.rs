@@ -3,7 +3,8 @@
 use crate::app::state::AppState;
 use crate::runtime::controller::ControllerReceipt;
 use crate::runtime::mutation::{
-    DockerBackend, MutationBackend, MutationTarget, MutationVerb, PodmanBackend, RuntimeKind,
+    DockerBackend, InitKind, MutationBackend, MutationTarget, MutationVerb, OpenrcBackend,
+    PodmanBackend, RuntimeKind, SystemdBackend,
 };
 use crate::tui::ActiveTab;
 use crate::tui::tabs::Tab;
@@ -28,12 +29,15 @@ struct RuntimeItem {
     status_style: Option<Style>,
     container_name: Option<String>,
     running: bool,
+    /// The service name, for an item that is an init system service.
+    service_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeItemKind {
     Runtime,
     Container,
+    Service,
 }
 
 impl SelectableItem for RuntimeItem {
@@ -53,6 +57,7 @@ impl SelectableItem for RuntimeItem {
         match self.kind {
             RuntimeItemKind::Runtime => Some("🐳"),
             RuntimeItemKind::Container => Some("📦"),
+            RuntimeItemKind::Service => Some("⚙"),
         }
     }
 
@@ -67,6 +72,7 @@ impl SelectableItem for RuntimeItem {
                     .fg(Color::Cyan),
             ),
             RuntimeItemKind::Container => Some(Style::default().fg(Color::Green)),
+            RuntimeItemKind::Service => Some(Style::default().fg(Color::Magenta)),
         }
     }
 }
@@ -135,6 +141,7 @@ impl RuntimeTab {
                     status_style: None,
                     container_name: None,
                     running: false,
+                    service_name: None,
                 });
 
                 // Containers
@@ -157,11 +164,50 @@ impl RuntimeTab {
                         status_style: Some(status_style),
                         container_name: Some(container.name.clone()),
                         running: container.status.to_lowercase().contains("up"),
+                        service_name: None,
                     });
                 }
             }
 
-            // Init services would go here if we had them
+            // The services of the init system, with the state the init
+            // system itself reports.
+            let init = &runtime.init;
+            if init.detected {
+                all_items.push(RuntimeItem {
+                    id: format!("init-{}", init.kind),
+                    title: format!(
+                        "{} ({})",
+                        init.kind,
+                        init.service_manager_status.as_deref().unwrap_or("unknown")
+                    ),
+                    subtitle: Some(format!("{} services", init.services.len())),
+                    kind: RuntimeItemKind::Runtime,
+                    runtime_name: init.kind.clone(),
+                    status_style: None,
+                    container_name: None,
+                    running: false,
+                    service_name: None,
+                });
+
+                for service in &init.services {
+                    let status_style = if service.running {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        Style::default().fg(Color::Red)
+                    };
+                    all_items.push(RuntimeItem {
+                        id: format!("service-{}-{}", init.kind, service.name),
+                        title: service.name.clone(),
+                        subtitle: Some(format!("State: {}", service.state)),
+                        kind: RuntimeItemKind::Service,
+                        runtime_name: init.kind.clone(),
+                        status_style: Some(status_style),
+                        container_name: None,
+                        running: service.running,
+                        service_name: Some(service.name.clone()),
+                    });
+                }
+            }
         }
 
         self.items.set_items_preserving_selection(all_items);
@@ -322,6 +368,47 @@ impl RuntimeTab {
                             });
                         }
                     }
+                    RuntimeItemKind::Service => {
+                        if let Some(service) = runtime.init.services.iter().find(|service| {
+                            service.name == selected.service_name.clone().unwrap_or_default()
+                        }) {
+                            self.detail.add_section(crate::tui::widgets::DetailSection {
+                                title: "Service Details".to_string(),
+                                expanded: true,
+                                fields: vec![
+                                    crate::tui::widgets::DetailField {
+                                        key: "Name".to_string(),
+                                        value: service.name.clone(),
+                                        style: None,
+                                    },
+                                    crate::tui::widgets::DetailField {
+                                        key: "Init System".to_string(),
+                                        value: runtime.init.kind.clone(),
+                                        style: None,
+                                    },
+                                    crate::tui::widgets::DetailField {
+                                        key: "State".to_string(),
+                                        value: service.state.clone(),
+                                        style: Some(if service.running {
+                                            Style::default().fg(Color::Green)
+                                        } else {
+                                            Style::default().fg(Color::Red)
+                                        }),
+                                    },
+                                    crate::tui::widgets::DetailField {
+                                        key: "Running".to_string(),
+                                        value: if service.running { "Yes" } else { "No" }
+                                            .to_string(),
+                                        style: Some(if service.running {
+                                            Style::default().fg(Color::Green)
+                                        } else {
+                                            Style::default().fg(Color::Red)
+                                        }),
+                                    },
+                                ],
+                            });
+                        }
+                    }
                     RuntimeItemKind::Container => {
                         if let Some(cr) = runtime
                             .container_runtimes
@@ -405,6 +492,33 @@ impl RuntimeTab {
                         });
                     }
                 }
+                RuntimeItemKind::Service => {
+                    let name = selected.service_name.clone().unwrap_or_default();
+                    if selected.running {
+                        actions.push(Action {
+                            label: "Stop".to_string(),
+                            description: format!("Stop the service {}", name),
+                            key: Some('s'),
+                            enabled: true,
+                            dangerous: false,
+                        });
+                        actions.push(Action {
+                            label: "Restart".to_string(),
+                            description: format!("Restart the service {}", name),
+                            key: Some('r'),
+                            enabled: true,
+                            dangerous: false,
+                        });
+                    } else {
+                        actions.push(Action {
+                            label: "Start".to_string(),
+                            description: format!("Start the service {}", name),
+                            key: Some('s'),
+                            enabled: true,
+                            dangerous: false,
+                        });
+                    }
+                }
                 RuntimeItemKind::Runtime => {}
             }
 
@@ -414,20 +528,39 @@ impl RuntimeTab {
         }
     }
 
-    /// Resolve the mutation backend and target for the selected container.
+    /// Resolve the mutation backend and target for the selected item.
     fn mutation_for(&self) -> Option<(&'static dyn MutationBackend, MutationTarget)> {
         let selected = self.items.selected()?;
-        let name = selected.container_name.clone()?;
-        let runtime = match selected.runtime_name.as_str() {
-            "docker" => RuntimeKind::Docker,
-            "podman" => RuntimeKind::Podman,
-            _ => return None,
-        };
-        let backend: &'static dyn MutationBackend = match runtime {
-            RuntimeKind::Docker => &DockerBackend,
-            RuntimeKind::Podman => &PodmanBackend,
-        };
-        Some((backend, MutationTarget::Container { runtime, name }))
+
+        match selected.kind {
+            RuntimeItemKind::Container => {
+                let name = selected.container_name.clone()?;
+                let runtime = match selected.runtime_name.as_str() {
+                    "docker" => RuntimeKind::Docker,
+                    "podman" => RuntimeKind::Podman,
+                    _ => return None,
+                };
+                let backend: &'static dyn MutationBackend = match runtime {
+                    RuntimeKind::Docker => &DockerBackend,
+                    RuntimeKind::Podman => &PodmanBackend,
+                };
+                Some((backend, MutationTarget::Container { runtime, name }))
+            }
+            RuntimeItemKind::Service => {
+                let name = selected.service_name.clone()?;
+                let init = match selected.runtime_name.as_str() {
+                    "systemd" => InitKind::Systemd,
+                    "openrc" => InitKind::Openrc,
+                    _ => return None,
+                };
+                let backend: &'static dyn MutationBackend = match init {
+                    InitKind::Systemd => &SystemdBackend,
+                    InitKind::Openrc => &OpenrcBackend,
+                };
+                Some((backend, MutationTarget::Service { init, name }))
+            }
+            RuntimeItemKind::Runtime => None,
+        }
     }
 }
 
@@ -634,7 +767,9 @@ mod tests {
     use crate::access::{AccessContext, AccessTier};
     use crate::config::Config;
     use crate::runtime::controller::MutationController;
-    use crate::runtime::model::{ContainerRuntimeReport, ContainerSummary, RuntimeInspection};
+    use crate::runtime::model::{
+        ContainerRuntimeReport, ContainerSummary, InitReport, RuntimeInspection, ServiceSummary,
+    };
     use crate::runtime::mutation::MutationMode;
     use crate::tui::widgets::DialogResult;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -697,6 +832,34 @@ mod tests {
                     status: "Exited (0) 2 minutes ago".to_string(),
                 }],
             }],
+            ..RuntimeInspection::default()
+        });
+        state
+    }
+
+    /// A state with one stopped systemd service named "demo.service".
+    fn state_with_service(runner: Arc<RecordingRunner>) -> AppState {
+        let access = AccessContext {
+            tier: AccessTier::Root,
+        };
+        let mut state = AppState::bootstrap(Config::default(), access);
+        state.mutation_controller = Some(MutationController::new(
+            access,
+            MutationMode::Execute,
+            runner as Arc<dyn crate::platform::CommandRunner + Send + Sync>,
+        ));
+        state.runtime = Some(RuntimeInspection {
+            init: InitReport {
+                kind: "systemd".to_string(),
+                detected: true,
+                service_manager_status: Some("running".to_string()),
+                service_count: 1,
+                services: vec![ServiceSummary {
+                    name: "demo.service".to_string(),
+                    state: "inactive".to_string(),
+                    running: false,
+                }],
+            },
             ..RuntimeInspection::default()
         });
         state
@@ -808,6 +971,78 @@ mod tests {
         assert!(tab.last_receipt.is_none());
         assert!(state.mutation_audit().is_empty());
         assert!(tab.pending.is_none());
+    }
+
+    /// A service of the init system is listed with the state the init
+    /// system reports.
+    #[test]
+    fn the_init_services_are_listed() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let state = state_with_service(runner);
+        let mut tab = RuntimeTab::new();
+
+        tab.update(&state);
+
+        let titles: Vec<String> = tab
+            .items
+            .items
+            .iter()
+            .map(|item| item.title.clone())
+            .collect();
+        assert!(
+            titles.iter().any(|title| title == "demo.service"),
+            "the service is listed: {titles:?}"
+        );
+    }
+
+    /// A stopped service offers a start action.
+    #[test]
+    fn a_stopped_service_offers_a_start_action() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let state = state_with_service(runner);
+        let mut tab = RuntimeTab::new();
+
+        tab.update(&state);
+        // The first entry is the init system header, the second the service.
+        tab.items.handle_key(key(KeyCode::Char('j')));
+        tab.build_action_menu();
+
+        assert_eq!(tab.action_menu.actions.len(), 1);
+        assert_eq!(tab.action_menu.actions[0].label, "Start");
+    }
+
+    /// A service mutation goes through the init system backend.
+    #[test]
+    fn a_service_mutation_routes_through_the_init_backend() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let mut state = state_with_service(runner);
+        let mut tab = RuntimeTab::new();
+
+        tab.update(&state);
+        tab.items.handle_key(key(KeyCode::Char('j')));
+        tab.build_action_menu();
+
+        tab.handle_menu_result(DialogResult::Selected(0), &mut state);
+        assert!(tab.confirm_dialog.is_visible());
+
+        tab.handle_dialog_result(DialogResult::Confirmed, &mut state);
+
+        let receipt = tab.last_receipt.expect("a receipt should be recorded");
+        assert!(receipt.execution.executed);
+        assert_eq!(receipt.plan.command_line(), "systemctl start demo.service");
+        assert_eq!(state.mutation_audit().len(), 1);
+
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded[0], "systemctl start demo.service");
     }
 
     #[test]

@@ -1,7 +1,9 @@
 use crate::discovery::model::Diagnostic;
 use crate::platform::{CommandRunner, TextReader};
 use crate::runtime::container::{ContainerClient, ContainerClients};
-use crate::runtime::model::{ContainerRuntimeReport, InitReport, RuntimeInspection};
+use crate::runtime::model::{
+    ContainerRuntimeReport, InitReport, RuntimeInspection, ServiceSummary,
+};
 use crate::runtime::provider::ProviderIntegrationReport;
 use crate::runtime::provider::inspect_provider_integration;
 use crate::storage::inspect::find_binary;
@@ -112,7 +114,7 @@ fn inspect_init(reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeI
             .as_ref()
             .and_then(|program| runner.run(program, &["is-system-running"]).ok())
             .map(first_output);
-        let service_count = binary
+        let services = binary
             .as_ref()
             .and_then(|program| {
                 runner
@@ -128,8 +130,8 @@ fn inspect_init(reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeI
                     )
                     .ok()
             })
-            .map(|output| count_service_lines(&output.stdout))
-            .unwrap_or(0);
+            .map(|output| parse_systemd_services(&output.stdout))
+            .unwrap_or_default();
 
         return RuntimeInspection {
             container_runtimes: Vec::new(),
@@ -137,7 +139,8 @@ fn inspect_init(reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeI
                 kind: "systemd".to_string(),
                 detected: true,
                 service_manager_status,
-                service_count,
+                service_count: services.len(),
+                services,
             },
             diagnostics: Vec::new(),
             provider_integration: ProviderIntegrationReport::default(),
@@ -150,11 +153,11 @@ fn inspect_init(reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeI
             .as_ref()
             .and_then(|program| runner.run(program, &["--runlevel"]).ok())
             .map(first_output);
-        let service_count = binary
+        let services = binary
             .as_ref()
             .and_then(|program| runner.run(program, &["--all"]).ok())
-            .map(|output| count_service_lines(&output.stdout))
-            .unwrap_or(0);
+            .map(|output| parse_openrc_services(&output.stdout))
+            .unwrap_or_default();
 
         return RuntimeInspection {
             container_runtimes: Vec::new(),
@@ -162,7 +165,8 @@ fn inspect_init(reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeI
                 kind: "openrc".to_string(),
                 detected: true,
                 service_manager_status,
-                service_count,
+                service_count: services.len(),
+                services,
             },
             diagnostics: Vec::new(),
             provider_integration: ProviderIntegrationReport::default(),
@@ -176,18 +180,62 @@ fn inspect_init(reader: &dyn TextReader, runner: &dyn CommandRunner) -> RuntimeI
             detected: false,
             service_manager_status: None,
             service_count: 0,
+            services: Vec::new(),
         },
         diagnostics: Vec::new(),
         provider_integration: ProviderIntegrationReport::default(),
     }
 }
 
-fn count_service_lines(output: &str) -> usize {
+/// Read the services out of `systemctl list-units`.
+///
+/// The plain output is `UNIT LOAD ACTIVE SUB DESCRIPTION`, so the unit name
+/// is the first field and the active state the third. A unit that systemd
+/// reports as `active` is running, even when its process has exited — that
+/// is what systemd means by the state.
+fn parse_systemd_services(output: &str) -> Vec<ServiceSummary> {
     output
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with("UNIT") && !line.starts_with("Swap:"))
-        .count()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let name = fields.next()?.to_string();
+            let _load = fields.next()?;
+            let active = fields.next()?;
+            let state = fields.next().unwrap_or(active);
+            Some(ServiceSummary {
+                name,
+                state: state.to_string(),
+                running: active == "active",
+            })
+        })
+        .collect()
+}
+
+/// Read the services out of `rc-status --all`.
+///
+/// The output is one service per line, as `name | state`, where the state
+/// is `started`, `stopped` or `crashed`.
+fn parse_openrc_services(output: &str) -> Vec<ServiceSummary> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let (name, state) = line.split_once('|')?;
+            let name = name.trim();
+            let state = state.trim();
+            if name.is_empty() || state.is_empty() {
+                return None;
+            }
+            Some(ServiceSummary {
+                name: name.to_string(),
+                state: state.to_string(),
+                running: state == "started",
+            })
+        })
+        .collect()
 }
 
 pub fn first_output(output: crate::platform::CommandOutput) -> String {
@@ -250,6 +298,59 @@ mod tests {
             image: "nginx:latest".to_string(),
             status: "running".to_string(),
         }
+    }
+
+    /// The systemd output is read as `UNIT LOAD ACTIVE SUB DESCRIPTION`.
+    #[test]
+    fn the_systemd_service_list_is_read_from_the_daemon() {
+        let output = "\
+sshd.service loaded active running OpenBSD Secure Shell server
+cron.service loaded inactive dead Regular background program processing daemon
+user@1000.service loaded active exited User Manager for UID 1000
+";
+
+        let services = parse_systemd_services(output);
+
+        assert_eq!(services.len(), 3);
+        assert_eq!(services[0].name, "sshd.service");
+        assert_eq!(services[0].state, "running");
+        assert!(services[0].running);
+        assert_eq!(services[1].state, "dead");
+        assert!(!services[1].running);
+        assert!(
+            services[2].running,
+            "a service that is active but has exited is still active"
+        );
+    }
+
+    /// The OpenRC output is read as `name | state`.
+    #[test]
+    fn the_openrc_service_list_is_read_from_the_daemon() {
+        let output = "\
+OpenRC 0.42.2 is running
+ sshd                | started
+ mount-ro-root       | stopped
+ crond               | crashed
+";
+
+        let services = parse_openrc_services(output);
+
+        assert_eq!(services.len(), 3);
+        assert_eq!(services[0].name, "sshd");
+        assert_eq!(services[0].state, "started");
+        assert!(services[0].running);
+        assert!(!services[1].running);
+        assert_eq!(services[2].state, "crashed");
+        assert!(!services[2].running);
+    }
+
+    /// Output that is not a service list yields no services.
+    #[test]
+    fn an_empty_service_list_yields_no_services() {
+        assert!(parse_systemd_services("").is_empty());
+        assert!(parse_systemd_services("UNIT LOAD ACTIVE SUB DESCRIPTION\n").is_empty());
+        assert!(parse_openrc_services("").is_empty());
+        assert!(parse_openrc_services("no services here\n").is_empty());
     }
 
     #[test]

@@ -1,5 +1,4 @@
 #![allow(clippy::items_after_test_module)]
-#![allow(dead_code)]
 #![allow(clippy::clone_on_copy)]
 
 use crate::error::AnvilError;
@@ -444,7 +443,6 @@ impl MutationGateway {
         Self { access, mode }
     }
 
-    #[allow(dead_code)]
     pub fn can_mutate(&self) -> bool {
         self.access.allows_mutation()
     }
@@ -480,12 +478,6 @@ impl MutationGateway {
     }
 }
 
-pub struct PlannedAction {
-    pub summary: String,
-    pub command: String,
-    pub executed: bool,
-}
-
 fn verb_name(verb: MutationVerb) -> &'static str {
     match verb {
         MutationVerb::Start => "start service",
@@ -495,14 +487,6 @@ fn verb_name(verb: MutationVerb) -> &'static str {
         MutationVerb::Disable => "disable service",
         MutationVerb::Install => "install container",
         MutationVerb::Remove => "remove container",
-    }
-}
-
-#[allow(dead_code)]
-pub fn mutation_kind(target: &MutationTarget) -> &'static str {
-    match target {
-        MutationTarget::Container { .. } | MutationTarget::ContainerInstall { .. } => "container",
-        MutationTarget::Service { .. } => "service",
     }
 }
 
@@ -718,14 +702,6 @@ pub fn rollback_verb(verb: MutationVerb) -> Option<MutationVerb> {
     }
 }
 
-pub fn mutation_target_name(target: &MutationTarget) -> &str {
-    match target {
-        MutationTarget::Container { name, .. } => name,
-        MutationTarget::Service { name, .. } => name,
-        MutationTarget::ContainerInstall { spec, .. } => &spec.name,
-    }
-}
-
 impl MutationGateway {
     pub fn execute(
         &self,
@@ -778,17 +754,6 @@ impl MutationGateway {
             stderr: output.stderr,
             mechanism: ExecutionMechanism::Command,
         })
-    }
-
-    pub fn plan_and_execute(
-        &self,
-        backend: &dyn MutationBackend,
-        target: &MutationTarget,
-        verb: &MutationVerb,
-        runner: &dyn crate::platform::CommandRunner,
-    ) -> Result<MutationExecutionReceipt, AnvilError> {
-        let plan = self.plan(backend, target, verb)?;
-        self.execute(&plan, runner)
     }
 }
 
