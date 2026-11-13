@@ -85,6 +85,15 @@ sh scripts/install-runtimes.sh --runtime podman --execute --yes
   marks the daemon unreachable.
 - The UI never shows simulated data: every number comes from a real read, and
   every mutation receipt names the mechanism that carried it out.
+- The init system is read for real: `systemctl list-units` and `rc-status
+  --all` are parsed into the service list the runtime tab shows, and the
+  service mutations go through `SystemdBackend`/`OpenrcBackend`.
+- Creating a container through the API pulls the image first; the daemon does
+  not fetch it when the container is created.
+- The CLI exits with a code that says what has to change: 2 for a
+  configuration error, 3 for a permission error, 1 for a runtime failure.
+- There is no `#[allow(dead_code)]` in `src/`; dead code is removed or gated
+  with `#[cfg(test)]` instead.
 - Plugin report diagnostics distinguish invalid plugins without failing inventory.
 - The Wasm plugin host does not expose host functions yet; the sandbox is
   capability-gated and versioned.

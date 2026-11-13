@@ -86,6 +86,19 @@ Every report has a `--json` form:
 anvil runtime --json | jq '.container_runtimes'
 ```
 
+The reports say what they found and nothing else. `anvil runtime` lists the
+services the init system reports, with the state it reports:
+
+```
+container_runtimes=0 init=systemd init_detected=true services=136
+  service sshd.service running
+  service cron.service dead
+```
+
+A command that fails exits with a code that says what has to change: `2` for a
+configuration problem, `3` for a permission problem, `1` for a runtime
+failure.
+
 ### The catalog
 
 ```sh

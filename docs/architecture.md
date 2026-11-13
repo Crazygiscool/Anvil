@@ -241,6 +241,11 @@ runtime for its container list. The containers are structured data, not parsed
 command output. The init system is still detected through the command line,
 because `systemd` and OpenRC have no API worth speaking here.
 
+The init system is read for real, not counted: `systemctl list-units` and
+`rc-status --all` are parsed into a list of services with the state the init
+system itself reports, so the runtime tab can list them and the receipt can
+name the unit that was touched.
+
 The report distinguishes three states: the daemon answered, the daemon is not
 reachable, or the runtime is not installed at all.
 
@@ -372,8 +377,9 @@ dismissed by a key the tab would otherwise consume.
 
 The widgets (`src/tui/widgets/`) are a general-purpose toolkit: a filterable
 and sortable list, a structured detail pane, an action menu, a confirmation
-dialog and a progress overlay. They are not catalog-specific, and not every
-entry point is wired into a tab yet.
+dialog and a progress overlay. They are not catalog-specific, and an entry
+point that no tab uses does not stay in the tree: the compiler says so, and
+the build fails on the warning.
 
 ---
 
@@ -395,6 +401,19 @@ anvil catalog update --from-file FILE
 
 The inspection commands print a report or the same report as JSON. `apply`
 requires `--dry-run` and refuses to run without it.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | The command succeeded |
+| 1 | A runtime failure: an I/O error, a command that failed, an error from the host |
+| 2 | A configuration error: a missing or broken config file, a manifest with the wrong version |
+| 3 | A permission error: the session is not allowed to make the change it was asked to make |
+
+The code says what has to change before the command can work again: a
+configuration problem needs a different file, a permission problem needs a
+different session, and a runtime failure needs the host to behave differently.
 
 ---
 

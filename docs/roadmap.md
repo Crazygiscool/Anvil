@@ -32,9 +32,9 @@ See [`architecture.md`](architecture.md) for how it is put together.
 | Host discovery | Done |
 | Telemetry sampling | Done |
 | Storage inspection | Done (read-only) |
-| Runtime inspection | Done |
+| Runtime inspection | Done — containers, the init system and its services |
 | Container lifecycle mutations | Done, through the Docker API or the command line |
-| Init service mutations | Done, through the command line |
+| Init service mutations | Done — the services are listed with their real state, and start/stop/restart go through `systemctl` or `rc-service` |
 | Application catalog | Done — index, validation, CLI and TUI tab |
 | Wasm plugin inventory | Done — sandboxed scan and report |
 | Provisioning manifests | Done — parsing, validation and a dry-run plan |

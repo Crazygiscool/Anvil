@@ -57,7 +57,7 @@ cargo run -- discover               # host discovery
 cargo run -- discover --json
 cargo run -- storage                # storage inspection
 cargo run -- storage --json
-cargo run -- runtime                # container runtimes and the init system
+cargo run -- runtime                # container runtimes, the init system and its services
 cargo run -- runtime --json
 cargo run -- plugins                # Wasm plugin inventory
 cargo run -- plugins --json
@@ -122,6 +122,10 @@ Add your own applications by writing a catalog index — see
 - Plugin manifests must use `api_version = 1`, name a relative `.wasm`
   library inside their own directory, and ask only for capabilities the host
   allows.
+
+A command that fails exits with a code that says what has to change: `2` for a
+configuration problem, `3` for a permission problem, `1` for a runtime
+failure.
 
 ---
 
