@@ -187,6 +187,7 @@ corrupt the display.
 | [`docs/roadmap.md`](docs/roadmap.md) | What is built, and what is not |
 | [`docs/catalog.md`](docs/catalog.md) | The catalog index format and CLI |
 | [`docs/plugins.md`](docs/plugins.md) | The plugin manifest and the sandbox |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release |
 
 ---
 
