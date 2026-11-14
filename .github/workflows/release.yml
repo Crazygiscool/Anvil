@@ -68,27 +68,23 @@ jobs:
 
             ## What is in this release
 
-            This is a follow-up to v0.2.0. It fixes what that release got
-            wrong and completes what it left half done.
+            This is a follow-up to v0.2.1. It makes the interface keep up with
+            the hand.
 
-            - **The init services are real.** `systemctl list-units` and
-              `rc-status --all` are parsed into the services the init system
-              reports, with the state it reports. The runtime tab lists them
-              and offers start, stop and restart, which go through
-              `systemctl` and `rc-service` behind the same privilege gate as
-              every other mutation.
-            - **`anvil runtime` prints the services**, so the command-line
-              report says the same thing the tab shows.
-            - **An install pulls the image first.** The Docker API does not
-              fetch an image when a container is created — it answers "no
-              such image". A catalog install on a host that did not already
-              have the image failed; it works now.
-            - **The exit code says what went wrong.** 2 for a configuration
-              problem, 3 for a permission problem, 1 for a runtime failure.
-              Before this, every failure was 1.
-            - **The dead code is gone.** The tree carried five blanket
-              `#![allow(dead_code)]` suppressions that hid code nothing
-              called. It carries none now.
+            - **A keystroke is handled when it happens.** The terminal is read
+              on a thread of its own. Before this, the event loop polled for
+              input once per refresh tick and read a single event per tick, so
+              every key waited up to a second and a held-down key moved the
+              cursor one row per second.
+            - **The screen is redrawn when something changed**, not on a timer:
+              a handled key, a new telemetry sample, a refreshed host report.
+            - **A frame only builds what changed.** The rows are built again
+              when the host state moved, and the detail pane when the selected
+              item changed. A frame that changes nothing builds nothing. The
+              runtime tab went from ~150 us per frame to ~260 ns.
+            - **The detail pane follows the selected item by identity**, not by
+              row, so a filter or a sort that puts another item under the
+              cursor shows that item.
 
             ## Install
 

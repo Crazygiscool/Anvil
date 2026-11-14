@@ -3,7 +3,7 @@
 Every release, in order. The version is the tag; the commits are the ones
 the release was cut from.
 
-## Unreleased
+## 0.2.2
 
 The interface stopped lagging: a keystroke is handled when it happens, and a
 frame only builds what changed.
