@@ -3,7 +3,7 @@
 use crate::app::state::AppState;
 use crate::tui::ActiveTab;
 use crate::tui::tabs::Tab;
-use crate::tui::widgets::{DetailPane, ListWidget, SelectableItem};
+use crate::tui::widgets::{BuildCache, DetailPane, ListWidget, SelectableItem};
 use crossterm::event::KeyEvent;
 use ratatui::{
     Frame,
@@ -44,6 +44,9 @@ pub struct OverviewTab {
     detail: DetailPane,
     show_help: bool,
     requested: Option<ActiveTab>,
+    /// What has already been built, so a keystroke does not rebuild the
+    /// whole pane.
+    cache: BuildCache<()>,
 }
 
 impl OverviewTab {
@@ -85,6 +88,7 @@ impl OverviewTab {
             detail,
             show_help: false,
             requested: None,
+            cache: BuildCache::default(),
         }
     }
 
@@ -369,9 +373,7 @@ impl Tab for OverviewTab {
         }
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState) {
-        self.build_detail(state);
-
+    fn render(&mut self, frame: &mut Frame, area: Rect, _state: &AppState) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
@@ -404,8 +406,14 @@ impl Tab for OverviewTab {
     }
 
     fn update(&mut self, state: &AppState) {
-        // Keep detail pane in sync
-        self.build_detail(state);
+        let _ = self.cache.rows_changed(
+            Some(state.host_generation),
+            Some(state.telemetry_generation),
+            Some(state.mutation_generation),
+        );
+        if self.cache.detail_changed(None) {
+            self.build_detail(state);
+        }
     }
 
     fn requested_tab(&self) -> Option<ActiveTab> {

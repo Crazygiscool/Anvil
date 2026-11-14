@@ -71,6 +71,10 @@ q quit | Tab/Shift+Tab switch tabs | h help | a actions | / filter | ? tab help
 `Tab` and `Shift+Tab` switch tabs, `q` quits, and `?` opens the help for the
 current tab.
 
+Keys are handled the moment they arrive, and the screen is redrawn when
+something changed rather than on a timer, so the interface keeps up with the
+hand and does not spend a frame rebuilding rows that did not change.
+
 ### The reports
 
 ```sh

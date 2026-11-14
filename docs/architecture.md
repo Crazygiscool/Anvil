@@ -141,6 +141,7 @@ src/
 │
 └── tui/                    The terminal interface
     ├── mod.rs              The event loop, the tab bar, the `ActiveTab` enum
+    ├── input.rs            The terminal reader thread
     ├── tabs/               One module per tab
     │   ├── mod.rs          The `Tab` trait and the `TabManager`
     │   ├── overview.rs     Host summary
@@ -153,7 +154,8 @@ src/
         ├── list.rs         Selectable list with filter and sort
         ├── detail.rs       Structured detail pane
         ├── dialog.rs       Action menu and confirmation dialog
-        └── progress.rs     Progress overlay
+        ├── progress.rs     Progress overlay
+        └── cache.rs        What a tab has already built
 ```
 
 ---
@@ -380,6 +382,34 @@ and sortable list, a structured detail pane, an action menu, a confirmation
 dialog and a progress overlay. They are not catalog-specific, and an entry
 point that no tab uses does not stay in the tree: the compiler says so, and
 the build fails on the warning.
+
+### The event loop
+
+The loop in `src/tui/mod.rs` waits on three things at once: the terminal, the
+state events, and the timers.
+
+The terminal is read on a thread of its own (`src/tui/input.rs`), which pushes
+the events into a channel. A keystroke is therefore handled the moment it
+arrives, rather than at the next timer tick, and a held-down key scrolls as
+fast as the terminal repeats it.
+
+The screen is redrawn when something changed, not on a timer. The telemetry
+task and the host-refresh task announce their work through `AppEvent::StateChanged`,
+and the loop draws a frame when that event arrives or when a key was handled.
+
+### What a frame builds
+
+A redraw used to rebuild everything the tab shows: the runtime tab turned its
+services into rows again, and the detail pane was formatted from scratch. That
+work does not belong between a keypress and the screen.
+
+`AppState` carries a generation counter for each source it holds
+(`host_generation`, `telemetry_generation`, `mutation_generation`), and each
+tab keeps a `BuildCache` (`src/tui/widgets/cache.rs`) that remembers what it
+already built. A frame that changes nothing builds nothing: the rows are built
+again when a generation moved, and the detail pane when the selected item
+changed. The key is the identity of the selected item, not its row, because a
+filter or a sort can put a different item under the same cursor.
 
 ---
 

@@ -3,7 +3,7 @@
 use crate::app::state::AppState;
 use crate::tui::ActiveTab;
 use crate::tui::tabs::Tab;
-use crate::tui::widgets::{DetailPane, ListWidget, SelectableItem};
+use crate::tui::widgets::{BuildCache, DetailPane, ListWidget, SelectableItem};
 use crossterm::event::KeyEvent;
 use ratatui::{
     Frame,
@@ -81,6 +81,9 @@ pub struct StorageTab {
     detail: DetailPane,
     current_view: StorageView,
     show_help: bool,
+    /// What has already been built, so a keystroke does not rebuild the
+    /// whole list.
+    cache: BuildCache<String>,
 }
 
 impl StorageTab {
@@ -94,6 +97,7 @@ impl StorageTab {
             detail,
             current_view: StorageView::Disks,
             show_help: false,
+            cache: BuildCache::default(),
         }
     }
 
@@ -370,7 +374,8 @@ impl StorageTab {
             StorageView::Lvm => StorageView::Mounts,
             StorageView::Mounts => StorageView::Disks,
         };
-        // Rebuild will happen in update()
+        // The rows show another view now.
+        self.cache.invalidate();
     }
 }
 
@@ -383,10 +388,10 @@ impl Tab for StorageTab {
         "Storage"
     }
 
-    fn handle_key(&mut self, key: KeyEvent, state: &mut AppState) -> bool {
+    fn handle_key(&mut self, key: KeyEvent, _state: &mut AppState) -> bool {
         // Handle list keys
         if self.items.handle_key(key) {
-            self.build_detail(state);
+            // The detail pane follows the selection in update().
             return true;
         }
 
@@ -398,11 +403,10 @@ impl Tab for StorageTab {
         match key.code {
             crossterm::event::KeyCode::Char('v') => {
                 self.cycle_view();
-                self.rebuild_items(state);
                 true
             }
             crossterm::event::KeyCode::Char('r') => {
-                self.rebuild_items(state);
+                self.cache.invalidate();
                 true
             }
             crossterm::event::KeyCode::Char('?') => {
@@ -413,10 +417,7 @@ impl Tab for StorageTab {
         }
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState) {
-        self.rebuild_items(state);
-        self.build_detail(state);
-
+    fn render(&mut self, frame: &mut Frame, area: Rect, _state: &AppState) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -471,7 +472,17 @@ impl Tab for StorageTab {
     }
 
     fn update(&mut self, state: &AppState) {
-        self.rebuild_items(state);
-        self.build_detail(state);
+        if self
+            .cache
+            .rows_changed(Some(state.host_generation), None, None)
+        {
+            self.rebuild_items(state);
+        }
+        if self
+            .cache
+            .detail_changed(self.items.selected().map(|item| item.id()))
+        {
+            self.build_detail(state);
+        }
     }
 }

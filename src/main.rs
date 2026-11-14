@@ -67,16 +67,18 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
         command_runner.clone(),
     );
 
-    runtime.state.write().await.discovery = Some(discovery::all(reader.as_ref(), &*command_runner));
-    runtime.state.write().await.storage =
-        Some(storage::inspect_storage(reader.as_ref(), &*command_runner));
-    runtime.state.write().await.runtime = Some(runtime::inspect_runtime_with_clients(
-        reader.as_ref(),
-        &*command_runner,
-        &runtime.clients,
-    ));
-    runtime.state.write().await.mutation_controller =
-        Some(runtime::MutationController::with_clients(
+    {
+        let mut state = runtime.state.write().await;
+        state.set_host_state(
+            discovery::all(reader.as_ref(), &*command_runner),
+            storage::inspect_storage(reader.as_ref(), &*command_runner),
+            runtime::inspect_runtime_with_clients(
+                reader.as_ref(),
+                &*command_runner,
+                &runtime.clients,
+            ),
+        );
+        state.mutation_controller = Some(runtime::MutationController::with_clients(
             access,
             if std::env::var("ANVIL_ALLOW_MUTATION").ok().as_deref() == Some("1") {
                 runtime::mutation::MutationMode::Execute
@@ -86,10 +88,11 @@ async fn run(cli: Cli, access: access::AccessContext) -> anyhow::Result<()> {
             command_runner.clone(),
             runtime.clients.clone(),
         ));
-    runtime.state.write().await.plugins = Some(crate::plugins::WasmPluginEngine::new().scan(
-        reader.as_ref(),
-        &crate::plugins::default_plugin_directories(access::effective_uid()),
-    ));
+        state.plugins = Some(crate::plugins::WasmPluginEngine::new().scan(
+            reader.as_ref(),
+            &crate::plugins::default_plugin_directories(access::effective_uid()),
+        ));
+    }
 
     match cli.command {
         None | Some(Commands::Tui { .. }) => {

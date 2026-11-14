@@ -16,8 +16,8 @@ use crate::runtime::mutation::{MutationBackend, MutationMode, MutationTarget, Mu
 use crate::tui::ActiveTab;
 use crate::tui::tabs::Tab;
 use crate::tui::widgets::{
-    Action, ActionMenu, ConfirmDialog, DetailPane, DialogResult, ListWidget, ProgressOverlay,
-    SelectableItem,
+    Action, ActionMenu, BuildCache, ConfirmDialog, DetailPane, DialogResult, ListWidget,
+    ProgressOverlay, SelectableItem,
 };
 use crossterm::event::KeyEvent;
 use ratatui::{
@@ -115,6 +115,9 @@ pub struct CatalogTab {
     pending: Option<PendingMutation>,
     last_receipt: Option<ControllerReceipt>,
     show_help: bool,
+    /// What has already been built, so a keystroke does not rebuild the
+    /// whole list.
+    cache: BuildCache<String>,
 }
 
 impl CatalogTab {
@@ -140,6 +143,7 @@ impl CatalogTab {
             pending: None,
             last_receipt: None,
             show_help: false,
+            cache: BuildCache::default(),
         }
     }
 
@@ -500,11 +504,11 @@ impl Tab for CatalogTab {
         "Catalog"
     }
 
-    fn handle_key(&mut self, key: KeyEvent, state: &mut AppState) -> bool {
+    fn handle_key(&mut self, key: KeyEvent, _state: &mut AppState) -> bool {
         // Overlays are handled by the tab manager before the tab sees a key.
         if self.apps.handle_key(key) {
-            self.build_detail(state);
-            self.build_action_menu(state);
+            // The detail pane and the action menu follow the selection in
+            // update().
             return true;
         }
 
@@ -524,16 +528,13 @@ impl Tab for CatalogTab {
                 if !self.categories.is_empty() {
                     self.selected_category = (self.selected_category + 1) % self.categories.len();
                 }
-                self.rebuild_items(state);
-                self.build_detail(state);
-                self.build_action_menu(state);
+                // The rows show another category now.
+                self.cache.invalidate();
                 true
             }
             crossterm::event::KeyCode::Char('r') => {
                 self.load_index();
-                self.rebuild_items(state);
-                self.build_detail(state);
-                self.build_action_menu(state);
+                self.cache.invalidate();
                 true
             }
             crossterm::event::KeyCode::Char('?') => {
@@ -544,9 +545,7 @@ impl Tab for CatalogTab {
         }
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState) {
-        self.build_detail(state);
-
+    fn render(&mut self, frame: &mut Frame, area: Rect, _state: &AppState) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -626,10 +625,21 @@ impl Tab for CatalogTab {
     fn update(&mut self, state: &AppState) {
         if self.index.is_none() && self.index_error.is_none() {
             self.load_index();
+            self.cache.invalidate();
         }
-        self.rebuild_items(state);
-        self.build_detail(state);
-        self.build_action_menu(state);
+        if self
+            .cache
+            .rows_changed(Some(state.host_generation), None, None)
+        {
+            self.rebuild_items(state);
+        }
+        if self
+            .cache
+            .detail_changed(self.apps.selected().map(|item| item.id()))
+        {
+            self.build_detail(state);
+            self.build_action_menu(state);
+        }
     }
 
     fn handle_menu_result(&mut self, result: DialogResult, state: &mut AppState) {
@@ -734,6 +744,8 @@ impl Tab for CatalogTab {
                         .add_detail(format!("Rollback: {}", rollback.command_line()));
                 }
                 self.last_receipt = Some(receipt);
+                // The receipt is part of the detail pane.
+                self.cache.invalidate_detail();
             }
             Err(error) => {
                 self.progress
@@ -1132,6 +1144,9 @@ mod tests {
         assert!(tab.handle_key(key(KeyCode::Char('c')), &mut state));
 
         assert_eq!(tab.selected_category, 1);
+
+        // The rows are rebuilt in the next update, as the event loop does.
+        tab.update(&state);
         assert_eq!(tab.apps.total_count(), 1);
     }
 

@@ -97,6 +97,11 @@ sh scripts/install-runtimes.sh --runtime podman --execute --yes
 - Plugin report diagnostics distinguish invalid plugins without failing inventory.
 - The Wasm plugin host does not expose host functions yet; the sandbox is
   capability-gated and versioned.
+- The TUI reads the terminal on a thread of its own (`src/tui/input.rs`), so a
+  keystroke is handled when it happens rather than at the next refresh tick.
+- The screen is redrawn when something changed (`AppEvent::StateChanged`), and
+  each tab rebuilds only what changed (`BuildCache` in `src/tui/widgets/cache.rs`).
+  A frame that changes nothing builds nothing.
 
 ## Phase Ledger
 
@@ -119,6 +124,7 @@ Phases 1–14 are the only record of the original roadmap, so they are kept here
 | 18 | Container API through `bollard`, structured inspection, client caching, CI smoke job | `a9d2e07`, `beb4669`, `4bedd75` |
 | 19 | Docs and release alignment: architecture, roadmap, catalog, plugins, README, v0.2.0 | `956a3c9`, `971e067`, `9292ddb`, `37b137a`, `633fae8` |
 | 20 | Init services read for real and mutable, the pull-before-create fix, meaningful exit codes, the dead code removed | `a6bd2a0`, `5b29fc3`, `a806dc0`, `9cf6d82`, `546399a` |
+| 21 | TUI responsiveness: the terminal is read on its own thread, the screen is redrawn on change, and a frame only builds what changed | (pending) |
 
 ## Paths & Standards
 

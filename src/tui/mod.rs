@@ -1,5 +1,6 @@
 //! Interactive TUI module with tab management and reusable widgets.
 
+pub mod input;
 pub mod tabs;
 pub mod widgets;
 
@@ -20,7 +21,6 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{RwLock, broadcast};
 
 /// Identifies a TUI tab.
@@ -75,7 +75,7 @@ pub async fn run_tui(
     runner: Arc<dyn crate::platform::CommandRunner + Send + Sync>,
     clients: crate::runtime::container::ContainerClients,
 ) -> crate::error::Result<()> {
-    use crossterm::event::{Event, KeyEventKind, poll as poll_event, read as read_event};
+    use crossterm::event::{Event, KeyEventKind};
     use crossterm::terminal::{
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     };
@@ -93,6 +93,10 @@ pub async fn run_tui(
 
     let interval_duration = TokioDuration::from_millis(refresh_rate.max(1));
 
+    // Subscribe before anything can send, so the first report is not missed.
+    let event_sender = events.clone();
+    let mut events = events.subscribe();
+
     // Keep a handle on the reader/runner for the host state refresh, which
     // outlives the telemetry task below.
     let refresh_reader = reader.clone();
@@ -101,6 +105,7 @@ pub async fn run_tui(
 
     let mut telemetry_task = tokio::spawn({
         let state = state.clone();
+        let events = event_sender.clone();
         async move {
             let mut interval = tokio::time::interval(interval_duration);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -109,16 +114,18 @@ pub async fn run_tui(
             let startup_sample = sampler.sample(reader.as_ref());
             {
                 let mut guard = state.write().await;
-                guard.telemetry = Some(startup_sample);
+                guard.set_telemetry(startup_sample);
                 guard.running = true;
             }
+            let _ = events.send(AppEvent::StateChanged);
 
             loop {
                 interval.tick().await;
                 let sample = sampler.sample(reader.as_ref());
                 if let Ok(mut guard) = state.try_write() {
-                    guard.telemetry = Some(sample);
+                    guard.set_telemetry(sample);
                     guard.running = true;
+                    let _ = events.send(AppEvent::StateChanged);
                 }
             }
         }
@@ -126,8 +133,6 @@ pub async fn run_tui(
 
     let mut tab_manager = create_tab_manager();
     let mut show_help = false;
-    let event_sender = events.clone();
-    let mut events = events.subscribe();
     let mut tick = tokio::time::interval(interval_duration);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -138,6 +143,23 @@ pub async fn run_tui(
         tokio::time::interval(std::time::Duration::from_millis(host_refresh_rate));
     refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut refresh_task: Option<tokio::task::JoinHandle<()>> = None;
+
+    // The terminal is read on its own thread, so a keystroke is handled the
+    // moment it arrives instead of at the next tick.
+    let mut input = input::TerminalInput::start();
+
+    // The screen is redrawn when something changed, not on a timer. The
+    // timer only exists to give the loop a chance to reap a finished
+    // refresh and to keep the live counters moving.
+    let mut redraw = true;
+
+    // Draw the first frame before waiting for input, so the tabs have
+    // their data when the first keystroke arrives.
+    if let Ok(state_guard) = state.try_read() {
+        let _ = terminal.draw(|frame| {
+            render_tui(frame, &mut tab_manager, &state_guard, show_help);
+        });
+    }
 
     let result = loop {
         tokio::select! {
@@ -154,8 +176,36 @@ pub async fn run_tui(
             event = events.recv() => {
                 match event {
                     Ok(AppEvent::Shutdown) => break Ok(()),
+                    Ok(AppEvent::StateChanged) => { redraw = true; }
                     Err(broadcast::error::RecvError::Closed) => break Ok(()),
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => { redraw = true; }
+                }
+            }
+            input = input.next() => {
+                let Some(input) = input else {
+                    break Ok(());
+                };
+                match input {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        let handled = {
+                            let mut state_guard = state.write().await;
+                            tab_manager.handle_key(key, &mut state_guard)
+                        };
+                        if !handled {
+                            match key.code {
+                                crossterm::event::KeyCode::Char('q') => break Ok(()),
+                                crossterm::event::KeyCode::Char('h') => {
+                                    show_help = !show_help;
+                                    redraw = true;
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            redraw = true;
+                        }
+                    }
+                    Event::Resize(_, _) => { redraw = true; }
+                    _ => {}
                 }
             }
             _ = refresh_tick.tick(), if refresh_task.is_none() => {
@@ -163,6 +213,7 @@ pub async fn run_tui(
                 let reader = refresh_reader.clone();
                 let runner = refresh_runner.clone();
                 let clients = refresh_clients.clone();
+                let events = event_sender.clone();
                 refresh_task = Some(tokio::spawn(async move {
                     let collected = tokio::task::spawn_blocking(move || {
                         crate::app::runtime::collect_host_state(
@@ -177,9 +228,9 @@ pub async fn run_tui(
                         return;
                     };
                     let mut guard = state.write().await;
-                    guard.discovery = Some(discovery);
-                    guard.storage = Some(storage);
-                    guard.runtime = Some(runtime);
+                    guard.set_host_state(discovery, storage, runtime);
+                    drop(guard);
+                    let _ = events.send(AppEvent::StateChanged);
                 }));
             }
             _ = tick.tick() => {
@@ -188,28 +239,19 @@ pub async fn run_tui(
                 {
                     refresh_task = None;
                 }
-
-                if let Ok(true) = poll_event(Duration::ZERO)
-                    && let Ok(Event::Key(key)) = read_event()
-                        && key.kind == KeyEventKind::Press {
-                            let mut state_guard = state.write().await;
-                            let handled = tab_manager.handle_key(key, &mut state_guard);
-                            if !handled {
-                                match key.code {
-                                    crossterm::event::KeyCode::Char('q') => break Ok(()),
-                                    crossterm::event::KeyCode::Char('h') => show_help = !show_help,
-                                    _ => {}
-                                }
-                            }
-                        }
             }
         }
 
-        let snapshot = state.try_read();
-        if let Ok(state_guard) = snapshot {
-            let _ = terminal.draw(|frame| {
-                render_tui(frame, &mut tab_manager, &state_guard, show_help);
-            });
+        if redraw {
+            // The state is written by the telemetry and refresh tasks; a
+            // frame that cannot take the read lock is skipped and drawn on
+            // the next pass rather than blocking the keyboard.
+            if let Ok(state_guard) = state.try_read() {
+                let _ = terminal.draw(|frame| {
+                    render_tui(frame, &mut tab_manager, &state_guard, show_help);
+                });
+                redraw = false;
+            }
         }
     };
 

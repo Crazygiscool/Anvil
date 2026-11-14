@@ -3,6 +3,33 @@
 Every release, in order. The version is the tag; the commits are the ones
 the release was cut from.
 
+## Unreleased
+
+The interface stopped lagging: a keystroke is handled when it happens, and a
+frame only builds what changed.
+
+### Fixed
+
+- The terminal is read on a thread of its own, so a keystroke is handled the
+  moment it arrives. The event loop used to poll for input once per refresh
+  tick and read a single event per tick, which put a whole second in front
+  of every key with the default configuration.
+- A held-down key scrolls as fast as the terminal repeats it, instead of one
+  row per refresh tick.
+
+### Changed
+
+- The screen is redrawn when something changed — a handled key, a new
+  telemetry sample, a refreshed host report — rather than on every pass
+  through the event loop.
+- Each tab rebuilds only what changed. The rows are built again when the
+  host state moved, and the detail pane when the selected item changed; a
+  frame that changes nothing builds nothing. The runtime tab went from
+  ~150 µs per frame to ~260 ns.
+- The detail pane follows the selected item by identity rather than by row,
+  so a filter or a sort that puts another item under the cursor shows that
+  item.
+
 ## 0.2.1
 
 The init services are real, an install pulls the image it needs, the exit

@@ -9,7 +9,8 @@ use crate::runtime::mutation::{
 use crate::tui::ActiveTab;
 use crate::tui::tabs::Tab;
 use crate::tui::widgets::{
-    Action, ActionMenu, ConfirmDialog, DetailPane, ListWidget, ProgressOverlay, SelectableItem,
+    Action, ActionMenu, BuildCache, ConfirmDialog, DetailPane, ListWidget, ProgressOverlay,
+    SelectableItem,
 };
 use crossterm::event::KeyEvent;
 use ratatui::{
@@ -86,6 +87,9 @@ pub struct RuntimeTab {
     pending: Option<PendingMutation>,
     last_receipt: Option<ControllerReceipt>,
     show_help: bool,
+    /// What has already been built, so a keystroke does not rebuild the
+    /// whole list.
+    cache: BuildCache<String>,
 }
 
 /// A mutation waiting for user confirmation.
@@ -115,6 +119,7 @@ impl RuntimeTab {
             pending: None,
             last_receipt: None,
             show_help: false,
+            cache: BuildCache::default(),
         }
     }
 
@@ -573,12 +578,12 @@ impl Tab for RuntimeTab {
         "Runtime"
     }
 
-    fn handle_key(&mut self, key: KeyEvent, state: &mut AppState) -> bool {
+    fn handle_key(&mut self, key: KeyEvent, _state: &mut AppState) -> bool {
         // Overlays are handled by the tab manager before the tab sees a key.
         // Handle list keys
         if self.items.handle_key(key) {
-            self.build_detail(state);
-            self.build_action_menu();
+            // The detail pane and the action menu follow the selection in
+            // update().
             return true;
         }
 
@@ -595,7 +600,7 @@ impl Tab for RuntimeTab {
                 true
             }
             crossterm::event::KeyCode::Char('r') => {
-                self.rebuild_items(state);
+                self.cache.invalidate();
                 true
             }
             crossterm::event::KeyCode::Char('?') => {
@@ -606,10 +611,7 @@ impl Tab for RuntimeTab {
         }
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState) {
-        self.rebuild_items(state);
-        self.build_detail(state);
-
+    fn render(&mut self, frame: &mut Frame, area: Rect, _state: &AppState) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -747,6 +749,8 @@ impl Tab for RuntimeTab {
                     ));
                 }
                 self.last_receipt = Some(receipt);
+                // The receipt is part of the detail pane.
+                self.cache.invalidate_detail();
             }
             Err(error) => {
                 self.progress
@@ -756,8 +760,19 @@ impl Tab for RuntimeTab {
     }
 
     fn update(&mut self, state: &AppState) {
-        self.rebuild_items(state);
-        self.build_detail(state);
+        if self
+            .cache
+            .rows_changed(Some(state.host_generation), None, None)
+        {
+            self.rebuild_items(state);
+        }
+        if self
+            .cache
+            .detail_changed(self.items.selected().map(|item| item.id()))
+        {
+            self.build_detail(state);
+            self.build_action_menu();
+        }
     }
 }
 
@@ -865,6 +880,44 @@ mod tests {
         state
     }
 
+    /// A state with two stopped containers named "alpha" and "beta".
+    fn state_with_two_containers(runner: Arc<RecordingRunner>) -> AppState {
+        let access = AccessContext {
+            tier: AccessTier::Root,
+        };
+        let mut state = AppState::bootstrap(Config::default(), access);
+        state.mutation_controller = Some(MutationController::new(
+            access,
+            MutationMode::Execute,
+            runner as Arc<dyn crate::platform::CommandRunner + Send + Sync>,
+        ));
+        state.runtime = Some(RuntimeInspection {
+            container_runtimes: vec![ContainerRuntimeReport {
+                name: "docker".to_string(),
+                socket: "/var/run/docker.sock".to_string(),
+                binary: Some("/usr/bin/docker".to_string()),
+                daemon_reachable: true,
+                daemon_status: Some("running".to_string()),
+                containers: vec![
+                    ContainerSummary {
+                        id: "aaaaaaaaaaaa".to_string(),
+                        name: "alpha".to_string(),
+                        image: "nginx:latest".to_string(),
+                        status: "Exited (0) 2 minutes ago".to_string(),
+                    },
+                    ContainerSummary {
+                        id: "bbbbbbbbbbbb".to_string(),
+                        name: "beta".to_string(),
+                        image: "redis:latest".to_string(),
+                        status: "Exited (0) 3 minutes ago".to_string(),
+                    },
+                ],
+            }],
+            ..RuntimeInspection::default()
+        });
+        state
+    }
+
     /// Move the selection from the runtime header to the container entry.
     fn select_container(tab: &mut RuntimeTab) {
         tab.items.handle_key(key(KeyCode::Char('j')));
@@ -910,6 +963,54 @@ mod tests {
                 .and_then(|item| item.container_name.clone()),
             Some("web".to_string())
         );
+    }
+
+    #[test]
+    fn the_detail_pane_follows_the_row_when_a_filter_changes_it() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let state = state_with_two_containers(runner);
+        let mut tab = RuntimeTab::new();
+
+        tab.update(&state);
+        assert_eq!(tab.items.selected_index(), Some(0));
+
+        // The filter puts another item under the cursor.
+        tab.items.handle_key(key(KeyCode::Char('/')));
+        tab.items.handle_key(key(KeyCode::Char('b')));
+        tab.update(&state);
+
+        assert_eq!(
+            tab.items
+                .selected()
+                .and_then(|item| item.container_name.clone()),
+            Some("beta".to_string())
+        );
+        assert_eq!(tab.detail.title, "Details: beta (redis:latest)");
+    }
+
+    #[test]
+    fn the_detail_pane_is_left_alone_when_nothing_changed() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingRunner {
+            calls: Arc::clone(&calls),
+        });
+        let state = state_with_two_containers(runner);
+        let mut tab = RuntimeTab::new();
+
+        tab.update(&state);
+        tab.items.handle_key(key(KeyCode::Char('j')));
+        tab.update(&state);
+        assert_eq!(tab.detail.title, "Details: alpha (nginx:latest)");
+
+        // A frame that changes nothing must not rebuild the pane: the
+        // scroll offset the reader set survives.
+        tab.detail.scroll_offset = 4;
+        tab.update(&state);
+
+        assert_eq!(tab.detail.scroll_offset, 4);
     }
 
     #[test]

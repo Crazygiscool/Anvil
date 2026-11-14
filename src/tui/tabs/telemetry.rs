@@ -3,7 +3,7 @@
 use crate::app::state::AppState;
 use crate::tui::ActiveTab;
 use crate::tui::tabs::Tab;
-use crate::tui::widgets::DetailPane;
+use crate::tui::widgets::{BuildCache, DetailPane};
 use crossterm::event::KeyEvent;
 use ratatui::{
     Frame,
@@ -29,6 +29,9 @@ fn format_rate(bytes_per_second: f64) -> String {
 pub struct TelemetryTab {
     system_detail: DetailPane,
     show_help: bool,
+    /// What has already been built, so a keystroke does not rebuild the
+    /// whole pane.
+    cache: BuildCache<()>,
 }
 
 impl TelemetryTab {
@@ -38,6 +41,7 @@ impl TelemetryTab {
         Self {
             system_detail,
             show_help: false,
+            cache: BuildCache::default(),
         }
     }
 
@@ -289,9 +293,7 @@ impl Tab for TelemetryTab {
         }
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState) {
-        self.build_system_detail(state);
-
+    fn render(&mut self, frame: &mut Frame, area: Rect, _state: &AppState) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -318,6 +320,11 @@ impl Tab for TelemetryTab {
     }
 
     fn update(&mut self, state: &AppState) {
-        self.build_system_detail(state);
+        let _ = self
+            .cache
+            .rows_changed(None, Some(state.telemetry_generation), None);
+        if self.cache.detail_changed(None) {
+            self.build_system_detail(state);
+        }
     }
 }

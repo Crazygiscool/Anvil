@@ -3,7 +3,7 @@
 use crate::app::state::AppState;
 use crate::tui::ActiveTab;
 use crate::tui::tabs::Tab;
-use crate::tui::widgets::{DetailPane, ListWidget, SelectableItem};
+use crate::tui::widgets::{BuildCache, DetailPane, ListWidget, SelectableItem};
 use crossterm::event::KeyEvent;
 use ratatui::{
     Frame,
@@ -81,6 +81,9 @@ pub struct DiscoveryTab {
     detail: DetailPane,
     selected_id: Option<String>,
     show_help: bool,
+    /// What has already been built, so a keystroke does not rebuild the
+    /// whole tree.
+    cache: BuildCache<String>,
 }
 
 impl DiscoveryTab {
@@ -94,6 +97,7 @@ impl DiscoveryTab {
             detail,
             selected_id: None,
             show_help: false,
+            cache: BuildCache::default(),
         }
     }
 
@@ -392,18 +396,12 @@ impl Tab for DiscoveryTab {
         "Discovery"
     }
 
-    fn handle_key(&mut self, key: KeyEvent, state: &mut AppState) -> bool {
-        // Rebuild tree if needed
-        if self.tree.is_empty() && state.discovery.is_some() {
-            self.rebuild_tree(state);
-        }
-
+    fn handle_key(&mut self, key: KeyEvent, _state: &mut AppState) -> bool {
         // Handle list keys
         if self.flat_list.handle_key(key) {
             let selected = self.flat_list.selected().cloned();
             if let Some(selected) = selected {
                 self.selected_id = Some(selected.id.clone());
-                self.build_detail();
                 // Toggle expansion on Enter for categories
                 if selected.kind == DiscoveryKind::Category {
                     self.toggle_expand(&selected.id);
@@ -426,7 +424,7 @@ impl Tab for DiscoveryTab {
             }
             crossterm::event::KeyCode::Char('r') => {
                 // Refresh discovery - would need async trigger
-                self.rebuild_tree(state);
+                self.cache.invalidate();
                 true
             }
             crossterm::event::KeyCode::Char('?') => {
@@ -437,12 +435,7 @@ impl Tab for DiscoveryTab {
         }
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState) {
-        if self.tree.is_empty() && state.discovery.is_some() {
-            self.rebuild_tree(state);
-        }
-        self.build_detail();
-
+    fn render(&mut self, frame: &mut Frame, area: Rect, _state: &AppState) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -477,8 +470,14 @@ impl Tab for DiscoveryTab {
     }
 
     fn update(&mut self, state: &AppState) {
-        if self.tree.is_empty() && state.discovery.is_some() {
+        if self
+            .cache
+            .rows_changed(Some(state.host_generation), None, None)
+        {
             self.rebuild_tree(state);
+        }
+        if self.cache.detail_changed(self.selected_id.clone()) {
+            self.build_detail();
         }
     }
 }

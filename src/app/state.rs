@@ -22,6 +22,16 @@ pub struct AppState {
     pub running: bool,
     pub mutation_controller: Option<MutationController>,
     pub mutation_ledger: Vec<ControllerReceipt>,
+    /// Bumped when the collected host state changes.
+    ///
+    /// The tabs watch this to know when their rows have to be rebuilt. It
+    /// is a counter rather than a comparison because the reports are big
+    /// enough that comparing them on every frame is not free either.
+    pub host_generation: u64,
+    /// Bumped when the telemetry sample changes.
+    pub telemetry_generation: u64,
+    /// Bumped when a mutation is recorded.
+    pub mutation_generation: u64,
 }
 
 impl AppState {
@@ -37,7 +47,29 @@ impl AppState {
             running: true,
             mutation_controller: None,
             mutation_ledger: Vec::new(),
+            host_generation: 0,
+            telemetry_generation: 0,
+            mutation_generation: 0,
         }
+    }
+
+    /// Replace the collected host state and mark it as changed.
+    pub fn set_host_state(
+        &mut self,
+        discovery: DiscoveryReport,
+        storage: StorageInspection,
+        runtime: RuntimeInspection,
+    ) {
+        self.discovery = Some(discovery);
+        self.storage = Some(storage);
+        self.runtime = Some(runtime);
+        self.host_generation = self.host_generation.wrapping_add(1);
+    }
+
+    /// Replace the telemetry sample and mark it as changed.
+    pub fn set_telemetry(&mut self, sample: TelemetrySample) {
+        self.telemetry = Some(sample);
+        self.telemetry_generation = self.telemetry_generation.wrapping_add(1);
     }
 
     pub fn plan_runtime_mutation(
@@ -71,6 +103,7 @@ impl AppState {
 
         let receipt = receipt?;
         self.mutation_ledger.push(receipt.clone());
+        self.mutation_generation = self.mutation_generation.wrapping_add(1);
         Ok(receipt)
     }
 
